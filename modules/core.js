@@ -182,6 +182,21 @@ function commitReceiving(change){
     throw e;
   }
 }
+function commitOperationalData(sec, change){
+  const previous={data:S.data,findings:S.findings,docs:S.sec[sec].docs,draft:S.draft};
+  S.data={...S.data};
+  S.sec[sec].docs={...S.sec[sec].docs};
+  try{
+    change();
+    if(!save())throw new Error("Не удалось сохранить данные в браузере. Освободите место и повторите.");
+  }catch(error){
+    S.data=previous.data;
+    S.findings=previous.findings;
+    S.sec[sec].docs=previous.docs;
+    S.draft=previous.draft;
+    throw error;
+  }
+}
 function leaveDemo(){
   if(ownState){S=ownState;ownState=null;}
   else if(S.mode==="demo")S.order=[];

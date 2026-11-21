@@ -92,7 +92,7 @@ function sheetHtml(){
 }
 /* ================= Отрисовка ================= */
 const app=document.getElementById("app");
-function render(keep){
+function render(keep, persist=true){
   const m=document.getElementById("main"), y=keep&&m?m.scrollTop:0;
   const sh=app.querySelector(".sheet"), sy=keep&&sh?sh.scrollTop:0;
   applyTheme();
@@ -102,7 +102,7 @@ function render(keep){
   const m2=document.getElementById("main");
   if(m2) m2.scrollTop=S.tab==="ai"&&S.step==="app"?m2.scrollHeight:y;
   const sh2=app.querySelector(".sheet"); if(sh2) sh2.scrollTop=sy;
-  save();
+  if(persist)save();
 }
 function setPath(p,v){const a=p.split(".");let o=S;for(let i=0;i<a.length-1;i++)o=o[a[i]];o[a[a.length-1]]=v;}
 function getPath(p){return p.split(".").reduce((o,k)=>(o==null?o:o[k]),S);}
@@ -232,16 +232,19 @@ const A={
    const d=S.draft||{rows:{},date:todayISO()};
    const entries=Object.keys(d.rows).filter(p=>String(d.rows[p]).trim()!=="");
    if(!entries.length)return toast("Введите хотя бы один факт");
-   if(!parseDate(d.date))return toast("Укажите дату инвентаризации");
+   const date=parseDate(d.date);
+   if(!date)return toast("Укажите дату инвентаризации");
    const invalid=entries.find(p=>!Number.isFinite(readNumber(d.rows[p]))||readNumber(d.rows[p])<0);
    if(invalid)return toast(`«${invalid}»: введите количество от нуля`);
-   const src="count."+d.date+"."+uid();
+   const src="count."+date+"."+uid();
    const rows=[], find=[], prices=matrixByPosition();
    let short=0, over=0, unpriced=0;
    entries.forEach(p=>{
      const book=bookOf(p), fact=readNumber(d.rows[p]), diff=fact-book;
      const row={pos:p,book,fact,unit:d.reference?.[p]?.unit||S.data.stock[p]?.unit||S.data.prices[p]?.unit||""};
      const price=inventoryPrice(row,prices);
+     row.diff=diff;
+     row.sum=diff*price;
      rows.push(row);
      if(diff!==0){
        const money_=Math.abs(diff)*price;
@@ -252,7 +255,7 @@ const A={
    });
    find.sort((a,b)=>b.sum-a.sum);
    const totals={short,over,unpriced};
-   const res={doc_type:"Сличительная ведомость",period:d.date,fits:true,summary:`Инвентаризация от ${ruDate(d.date)}: ${rows.length} позиций · ${inventoryTotals(totals)}.`,findings:[],missing:[],local:true};
+   const res={doc_type:"Сличительная ведомость",period:date,fits:true,summary:`Инвентаризация от ${ruDate(date)}: ${rows.length} позиций · ${inventoryTotals(totals)}.`,findings:[],missing:[],local:true};
    find.slice(0,6).forEach(f=>{
      const val=(f.diff<0?"−":"+")+fmt(Math.abs(f.diff))+(f.unit?" "+f.unit:"");
      res.findings.push({title:`${f.pos}: ${f.diff<0?"недостача":"излишек"} ${fmt(Math.abs(f.diff))}${f.unit?" "+f.unit:""}`,detail:`По учёту ${fmt(f.book)}, по факту ${fmt(f.fact)}.${f.price?` В деньгах ${money(f.sum)}.`:""}`,solution:f.diff<0?"Проверить техкарты и последнюю приёмку по этой позиции.":"Проверить, не списан ли товар не с той позиции.",value:val});
@@ -260,18 +263,21 @@ const A={
    if(possibleResort(totals)){
      res.findings.unshift({title:"Возможная пересортица",detail:`Недостачи ${money(short)}, излишки ${money(over)}: суммы почти равны. Сверьте недостачи и излишки по группам.`,solution:"Сверять группы (сиропы, пюре, крепкий алкоголь) суммой, а не по вкусам.",value:"пересортица",n:1});
    }
-   S.data.counts.unshift({id:uid(),src,date:d.date,rows,...totals});
-   S.data.counts.sort((a,b)=>b.date.localeCompare(a.date));
-   if(!d.reference&&!(S.sec.stock.docs.rest?.res?.snapshot?.date>d.date)&&!S.data.counts.some(c=>c.date>d.date)){
-     rows.forEach(r=>{Object.defineProperty(S.data.stock,r.pos,{enumerable:true,configurable:true,writable:true,
-       value:{qty:r.fact,unit:r.unit||S.data.stock[r.pos]?.unit||"",countDate:d.date}});});
-   }
-   S.findings=S.findings.filter(f=>f.src!==src);
-   res.findings.forEach((f,i)=>S.findings.push({id:src+"."+i,src,sec:"stock",title:f.title,detail:f.detail,solution:f.solution,value:f.value||"",n:f.n}));
-   S.sec.stock.docs.inv={name:"Инвентаризация "+d.date,res,local:true};
-   S.draft=null;sheet=null;render();toast("Инвентаризация сохранена");
+   try{commitOperationalData("stock",()=>{
+     S.data.counts=[{id:uid(),src,date,rows,...totals},...S.data.counts].sort((a,b)=>b.date.localeCompare(a.date));
+     if(!d.reference&&!(S.sec.stock.docs.rest?.res?.snapshot?.date>date)&&!S.data.counts.some(c=>c.date>date)){
+       S.data.stock={...S.data.stock};
+       rows.forEach(r=>{Object.defineProperty(S.data.stock,r.pos,{enumerable:true,configurable:true,writable:true,
+         value:{qty:r.fact,unit:r.unit||S.data.stock[r.pos]?.unit||"",countDate:date}});});
+     }
+     S.findings=S.findings.filter(f=>f.src!==src);
+     res.findings.forEach((f,i)=>S.findings.push({id:src+"."+i,src,sec:"stock",title:f.title,detail:f.detail,solution:f.solution,value:f.value||"",n:f.n}));
+     S.sec.stock.docs.inv={name:"Инвентаризация "+date,res,local:true};
+     S.draft=null;
+   });}catch(error){return toast(error.message);}
+   sheet=null;render(false,false);toast("Инвентаризация сохранена");
  },
- export:()=>{download("dashbar-"+todayISO()+".json",JSON.stringify(S,null,2),"application/json");toast("Копия скачана");},
+ export:()=>{if(isDemo())return toast("Откройте свой бар, чтобы сохранить копию.");download("dashbar-"+todayISO()+".json",JSON.stringify(S,null,2),"application/json");toast("Копия скачана");},
  eventnew:()=>{sheet={t:"event",rep:"none",date:days()[S.day].iso};render(true);},
  evrep:d=>{sheet.title=document.getElementById("ev-title").value;sheet.date=document.getElementById("ev-date").value;sheet.rep=d.v;render(true);},
  evsave:()=>{
@@ -360,12 +366,17 @@ app.addEventListener("submit",ev=>{
   if(ev.target.dataset.f==="chat"){const el=document.getElementById("chat-in");const v=el.value.trim();if(v&&!chatBusy){draft="";sendChat(v,ev.submitter?.name==="external");}}
 });
 function importBackup(file){
+  if(isDemo())return toast("Откройте свой бар, чтобы восстановить копию.");
+  const profile=S;
   const r=new FileReader();
+  r.onerror=()=>toast("Не удалось открыть файл копии.");
   r.onload=()=>{
+    if(S!==profile||isDemo())return toast("Профиль изменился. Откройте копию ещё раз.");
     try{
       const v=JSON.parse(r.result);
-      if(!v||typeof v!=="object"||!v.data)throw new Error("Это не резервная копия DashBar");
+      if(!v||typeof v!=="object"||!v.data||(v.v!=null&&v.v!==1&&v.v!==2))throw new Error("Это не резервная копия DashBar");
       const candidate=merge(blank(),v.v===1?migrate(v):v);
+      if(candidate.mode==="demo")throw new Error("Для восстановления нужна копия своего бара.");
       const defaults=blank();
       const validShape=(value,example)=>Array.isArray(example)?Array.isArray(value):
         example&&typeof example==="object"?value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(example).every(k=>validShape(value[k],example[k])):
@@ -373,9 +384,17 @@ function importBackup(file){
       if(!validShape(candidate,defaults)||candidate.day<0||candidate.day>=7||!Number.isInteger(candidate.day)||
          !["start","who","venue","three","app"].includes(candidate.step)||
          candidate.data.invoices.some(i=>!i||typeof i.date!=="string"||!Array.isArray(i.rows)||i.rows.some(row=>!row||typeof row.pos!=="string"))||
-         candidate.data.counts.some(c=>!c||!Array.isArray(c.rows)))throw new Error("Повреждена структура резервной копии");
-      const previous=S;
-      try{S=candidate;sheet=null;render();}catch(e){S=previous;render();throw e;}
+         candidate.data.counts.some(c=>!c||typeof c.date!=="string"||!Array.isArray(c.rows)||c.rows.some(r=>!r||typeof r.pos!=="string"))||
+         candidate.data.receipts.some(r=>!r||typeof r.date!=="string"||typeof r.warehouse!=="string"||
+           !Array.isArray(r.rows)||r.rows.some(row=>!row||typeof row.pos!=="string"||!Number.isFinite(row.qty))))throw new Error("Повреждена структура резервной копии");
+      const previousSheet=sheet;
+      try{
+        S=candidate;sheet=null;render(false,false);
+        if(!save()){
+          S=profile;sheet=previousSheet;render(false,false);
+          return toast("Копию не удалось сохранить в браузере. Прежние данные сохранены.");
+        }
+      }catch(error){S=profile;sheet=previousSheet;render(false,false);throw error;}
       toast("Копия загружена");
     }catch(e){toast("Не удалось прочитать копию");}
   };

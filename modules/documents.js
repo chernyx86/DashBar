@@ -540,7 +540,10 @@ function applyDoc(sec,docKey,parsed){
     for(const r of rows)Object.defineProperty(stock,r.pos,{enumerable:true,configurable:true,writable:true,
       value:{qty:readNumber(r.qty),unit:r.unit||S.data.stock[r.pos]?.unit||""}});
     S.data.stock=stock;
-    if(parsed.date)res.snapshot={date:parsed.date,warehouse:S.venue.stockName.trim()||"Бар"};
+    if(parsed.date){
+      res.snapshot={date:parsed.date,warehouse:S.venue.stockName.trim()||"Бар"};
+      S.data.stockReference={snapshot:res.snapshot,stock:{...stock}};
+    }
     res.summary=`Остатки: ${rows.length} позиций.`;
     const low=rows.filter(r=>num(r.qty)<=0);
     if(low.length)F.push({title:`Нулевой остаток: ${low.length} позиций`,detail:low.slice(0,5).map(r=>r.pos).join(", "),solution:"Проверить и добавить в заказ.",value:String(low.length)});
@@ -599,10 +602,10 @@ async function handleFile(sec,doc,file){
         const res=applyReceiving(doc,parsed,file);
         S.sec.receiving.docs={...S.sec.receiving.docs,[doc]:{name:file.name,res,local:true}};
       });
-      else{
+      else commitOperationalData(sec,()=>{
         const res=applyDoc(sec,doc,parsed);
         S.sec[sec].docs[doc]={name:file.name,res,local:true};
-      }
+      });
       toast("Разобрано на устройстве");
       return true;
     }

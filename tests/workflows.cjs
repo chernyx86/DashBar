@@ -10,10 +10,11 @@ const js=[...html.matchAll(/src="\.\/(modules\/[^"]+)"/g)].map(m=>fs.readFileSyn
 const storage=new Map();
 const test=(seed)=>{
   if(seed)storage.set("barmanager-proto-v2",JSON.stringify(seed));
-  const elements=new Map(), events={}, appEvents={};
+  const elements=new Map(), events={}, appEvents={}, toasts=[];
   const make=()=>({value:"",scrollTop:0,classList:{add(){},remove(){}},appendChild(){},click(){},remove(){},querySelector(){return null;}});
   const get=id=>{if(!elements.has(id))elements.set(id,make());return elements.get(id);};
   const document={getElementById:get,documentElement:{classList:make().classList,getAttribute(){return "";}},querySelector(){return null;},createElement:make,body:make()};
+  document.body.appendChild=element=>{if(element.className==="toast")toasts.push(element.textContent);};
   get("app").addEventListener=(type,cb)=>appEvents[type]=cb;
   const sandbox={
     document,XLSX:xlsx,window:{XLSX:xlsx, addEventListener:(type,cb)=>events[type]=cb},location:{hash:"",protocol:"https:"},history:{replaceState(){}},
@@ -24,7 +25,7 @@ const test=(seed)=>{
   };
   const context=vm.createContext(sandbox);
   vm.runInContext(js,context,{filename:"index.html"});
-  return {get,events,appEvents,context,run:code=>vm.runInContext(code,context),state:()=>JSON.parse(storage.get("barmanager-proto-v2")),body:()=>get("app").innerHTML};
+  return {get,events,appEvents,context,toasts,run:code=>vm.runInContext(code,context),state:()=>JSON.parse(storage.get("barmanager-proto-v2")),body:()=>get("app").innerHTML};
 };
 const header='"Позиция";"Количество";"Цена";"Сумма";"Единица";"Поставщик";"Дата";"Номер накладной"';
 const good=(number,date="20.11.2026",price="101,25",sum="202,50",unit="кг",supplier="Фрукты")=>header+'\nЯблоко;2;'+price+';'+sum+';'+unit+';'+supplier+';'+date+';'+number+'\nИтого;;;'+sum;
@@ -303,5 +304,43 @@ await upload("sales","undated.csv",usageCSV.split("\n").slice(1).join("\n"));
 assert.equal(t.run('dailyUse("Сироп","л")'),null);
 assert.match(t.run("lowStockBlock()"),/Для расчёта нужен период/);
 console.log("PASS: actual sales period, unit and category compatibility, stale and missing evidence");
+const recovery=test({mode:"own",step:"app",tab:"stock",venue:{name:"Исходный бар"},
+  draft:{date:"2026-11-20",rows:{Тоник:"0"}},data:{stock:{Тоник:{qty:4,unit:"шт"}}}});
+recovery.run("A.count()");
+const beforeRecovery=recovery.state(), storeProfile=recovery.context.localStorage.setItem;
+recovery.context.localStorage.setItem=()=>{throw new Error("QuotaExceededError");};
+recovery.run("A.invsave()");
+assert.equal(recovery.run("S.data.stock.Тоник.qty"),4);
+assert.equal(recovery.run("S.data.counts.length"),0);
+assert.equal(recovery.run("sheet.t"),"inv");
+assert.equal(recovery.run("S.draft.rows.Тоник"),"0");
+assert.match(recovery.toasts.at(-1),/Не удалось сохранить/);
+recovery.context.backup={text:JSON.stringify({...beforeRecovery,venue:{...beforeRecovery.venue,name:"Новый бар"}})};
+recovery.run("importBackup(backup)");
+assert.match(recovery.toasts.at(-1),/Прежние данные сохранены/);
+assert.equal(recovery.run("S.venue.name"),"Исходный бар");
+assert.deepEqual(recovery.state(),beforeRecovery);
+const stockFile="На дату: 21.11.2026\nПозиция;Количество;Единица\nТоник;9;шт";
+recovery.context.stockFile={name:"stock.csv",type:"text/csv",arrayBuffer:async()=>Buffer.from(stockFile)};
+assert.equal(await recovery.run('handleFile("stock","rest",stockFile)'),undefined);
+assert.equal(recovery.run("S.data.stock.Тоник.qty"),4);
+assert.match(recovery.run("S.sec.stock.docs.rest.err"),/Не удалось сохранить/);
+recovery.context.localStorage.setItem=storeProfile;
+assert.equal(await recovery.run('handleFile("stock","rest",stockFile)'),true);
+assert.equal(recovery.state().data.stockReference.snapshot.date,"2026-11-21");
+assert.equal(recovery.state().data.stockReference.stock.Тоник.qty,9);
+recovery.run("A.invsave()");
+assert.equal(recovery.state().data.counts.length,1);
+assert.equal(recovery.state().data.counts[0].rows[0].fact,0);
+recovery.run("importBackup(backup)");
+assert.equal(recovery.state().venue.name,"Новый бар");
+let pendingRead;
+recovery.context.FileReader=class {readAsText(file){this.result=file.text;pendingRead=()=>this.onload();}};
+recovery.run("importBackup(backup);A.demo()");
+pendingRead();
+assert.match(recovery.toasts.at(-1),/Профиль изменился/);
+recovery.run("A.home();A.own()");
+assert.equal(recovery.state().venue.name,"Новый бар");
+console.log("PASS: storage failure rollback for inventory, CSV and backup; retry and safe demo isolation");
 console.log("PASS. Manager workflow through application actions, import including TSV, wrong types, duplicate, totals and invalid date, price scope, findings and calendar, local answer, draft, order, backup, demo isolation, 2500 rows ("+ms+" ms in JS harness).");
 })().catch(e=>{console.error(e);process.exit(1);});
