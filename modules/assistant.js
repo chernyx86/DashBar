@@ -50,7 +50,7 @@ async function sendChat(text){
   S.chat.push(last);chatBusy=true;render();
   if(sampleFn){
     const hist=S.chat.slice(0,-1).slice(-12);
-    const sys=`Ты ИИ-ассистент приложения BarManager AI: помощник барменеджера. Отвечай по-русски, коротко и по делу, профессиональными терминами HoReCa. Приложение не правит данные само. Не выдумывай цифры; если данных не хватает, скажи, какой отчёт загрузить. Без Markdown.
+    const sys=`Ты ИИ-ассистент приложения DashBar: помощник барменеджера. Отвечай по-русски, коротко и по делу, профессиональными терминами HoReCa. Приложение не правит данные само. Не выдумывай цифры; если данных не хватает, скажи, какой отчёт загрузить. Без Markdown.
 Данные приложения:\n${ctx()}\n\nВопрос: `;
     const input=hist.map((m,i)=>({role:m.role,content:i===0?sys+m.content:m.content}));
     if(input[0].role!=="user")input.unshift({role:"user",content:sys+"(продолжение)"});

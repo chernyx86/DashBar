@@ -1,0 +1,252 @@
+const vm=require("node:vm");
+const fs=require("node:fs");
+const assert=require("node:assert/strict");
+const {performance}=require("node:perf_hooks");
+const path=require("node:path");
+const root=path.resolve(__dirname,"..");
+const xlsx=require(path.join(root,"assets/xlsx.full.min.js"));
+const html=fs.readFileSync(path.join(root,"index.html"),"utf8");
+const js=[...html.matchAll(/src="\.\/(modules\/[^"]+)"/g)].map(m=>fs.readFileSync(path.join(root,m[1]),"utf8")).join("\n");
+const storage=new Map();
+const test=(seed)=>{
+  if(seed)storage.set("barmanager-proto-v2",JSON.stringify(seed));
+  const elements=new Map(), events={}, appEvents={};
+  const make=()=>({value:"",scrollTop:0,classList:{add(){},remove(){}},appendChild(){},click(){},remove(){},querySelector(){return null;}});
+  const get=id=>{if(!elements.has(id))elements.set(id,make());return elements.get(id);};
+  const document={getElementById:get,documentElement:{classList:make().classList,getAttribute(){return "";}},querySelector(){return null;},createElement:make,body:make()};
+  get("app").addEventListener=(type,cb)=>appEvents[type]=cb;
+  const sandbox={
+    document,XLSX:xlsx,window:{XLSX:xlsx, addEventListener:(type,cb)=>events[type]=cb},location:{hash:"",protocol:"https:"},history:{replaceState(){}},
+    localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
+    confirm:()=>true,setTimeout:(f,ms)=>{if(ms===180)f();},TextDecoder,TextEncoder,Blob,File,URL,AbortSignal,FormData:class {constructor(form){this.data=new Map(Object.entries(form.values));} get(k){return this.data.get(k);} has(k){return this.data.has(k);} [Symbol.iterator](){return this.data[Symbol.iterator]();}},FileReader:class {
+      readAsText(file){this.result=file.text;this.onload();}
+    }, console,
+  };
+  const context=vm.createContext(sandbox);
+  vm.runInContext(js,context,{filename:"index.html"});
+  return {get,events,appEvents,context,run:code=>vm.runInContext(code,context),state:()=>JSON.parse(storage.get("barmanager-proto-v2")),body:()=>get("app").innerHTML};
+};
+const header='"Позиция";"Количество";"Цена";"Сумма";"Единица";"Поставщик";"Дата";"Номер накладной"';
+const good=(number,date="20.11.2026",price="101,25",sum="202,50",unit="кг",supplier="Фрукты")=>header+'\nЯблоко;2;'+price+';'+sum+';'+unit+';'+supplier+';'+date+';'+number+'\nИтого;;;'+sum;
+(async()=>{
+assert.match(html,/<title>DashBar/);
+let t=test();
+assert.match(t.body(),/DashBar/);
+const text=x=>assert.match(t.body(),x);
+const upload=async(d,n,content)=>{t.context.upload={name:n,type:n.endsWith("tsv")?"text/tab-separated-values":"text/csv",arrayBuffer:async()=>Buffer.isBuffer(content)?content:Buffer.from(content)};await t.run('handleFile(Object.keys(EXPECT).includes("'+d+'")?({rest:"stock",ttk:"cards",sales:"reports",inv:"stock"}["'+d+'"]||"receiving"):"receiving","'+d+'",upload)');};
+t.run("A.demo()");
+assert.equal(t.run("S.mode"),"demo");
+t.run('A.tab({t:"receiving"})');text(/Фрукты и зелень/);
+t.run('A.tab({t:"stock"});A.count();A.close();A.home();A.own();A.next({s:"venue"});A.next({s:"three"})');
+t.run('S.user.name="  ";S.venue.name="Проверка";A.pick({n:"ans.problem",v:"Накладные и цены"});A.pick({n:"ans.system",v:"iiko"});A.enter();A.tab({t:"receiving"})');
+assert.equal(t.run("sheet"),null);
+await upload("invoice","a.csv",good("A"));text(/В реестре сохранено 1 строк/);
+await upload("invoice","b.csv",good("B","21.11.2026","104","208","л"));text(/В реестре сохранено 1 строк/);
+await upload("invoice","copy.csv",good("A"));text(/уже есть в реестре/);
+await upload("invoice","bad.csv",good("C","22.11.2026","101","302"));text(/проверьте количество и сумму/);
+await upload("invoice","total.csv",good("C").replace("Итого;;;202,50","Итого;;;203,50"));text(/Итог файла не сходится/);
+await upload("invoice","date.csv",good("C","31.11.2026"));text(/Некорректная дата/);
+await upload("invoice","wrong.csv","Позиция;Учёт;Факт\nЯблоко;2;3");text(/Распознан другой тип/);
+assert.equal(t.state().data.invoices.length,2);
+assert.equal(t.state().sec.receiving.docs.invoice.name,"b.csv");
+await upload("matrix","matrix.tsv","Позиция\tЦена\tЕдиница\tПоставщик\nяблоко\t90,20\tкг\tФРУКТЫ");text(/Накладные пересверены/);
+assert.equal(t.state().findings.filter(x=>x.sec==="receiving").length,1);
+text(/Сверено 1 из 2 строк/);
+text(/Ожидает прихода · b\.csv/);
+t.run('A.tocal({id:S.findings[0].id});A.calpick({id:S.findings[0].id,i:0})');
+const id=t.state().findings[0].id;
+assert.equal(t.state().st[id].status,"cal");
+t.run('A.tab({t:"reports"});A.report({k:"r_reg"})');text(/Фрукты/);
+t.run('A.tab({t:"ai"})');await t.run('sendChat("Есть отклонения по ценам?")');text(/101,25 ₽/);
+t.run('A.settings()');assert.equal(t.run("tabs().length"),6);
+assert.doesNotMatch(t.body(),/data-a="viewas"|data-a="invite"/);
+t.run('A.close();A.tab({t:"receiving"})');
+await upload("invoice","c.csv",good("C","22.11.2026","110","220","кг","Другой"));text(/В реестре сохранено/);
+assert.equal(t.state().findings.filter(x=>x.sec==="receiving").length,1);
+t.run('A.tab({t:"stock"});A.close()');
+await upload("rest","stock.csv","Позиция;Остаток;Единица\nЯблоко;4;кг");text(/Остатки: 1 позиций/);
+t.run('A.count();S.draft.rows["Яблоко"]="1,5 кг";A.invsave()');
+assert.equal(t.state().data.counts.length,0);
+t.appEvents.input({target:{dataset:{inv:"Яблоко"},value:"1,5"}});
+t.run("A.close()");t=test();t.run("A.count()");
+assert.equal(t.state().draft.rows["Яблоко"],"1,5");
+t.run("A.invsave()");assert.equal(t.state().data.stock["Яблоко"].qty,1.5);
+t.get("ord-new").value="Яблоко, кг";t.run("A.ordadd()");
+t.appEvents.input({target:{dataset:{ord:"0"},value:"2x"}});
+assert.equal(t.run("orderText()"),"");
+t.appEvents.input({target:{dataset:{ord:"0"},value:"2,5"}});
+assert.match(t.run("orderText()"),/2,5/);
+t.run('A.tab({t:"cards"});A.close()');
+await upload("ttk","ttk.csv","Позиция;Брутто;Выход\nСироп;2;1,5");text(/Техкарта: 1 строк/);
+t.run('A.tab({t:"today"});A.eventnew()');
+t.get("ev-title").value="Заказ льда";
+t.get("ev-date").value=t.run("todayISO()");
+t.run('A.evrep({v:"week"})');text(/value="Заказ льда"/);
+t.run("A.evsave()");text(/Заказ льда/);
+assert.equal(t.run('eventsOn(S.cal.at(-1).iso).filter(e=>e.title==="Заказ льда").length'),1);
+assert.equal(t.run('(()=>{const d=new Date(S.cal.at(-1).iso);d.setUTCDate(d.getUTCDate()+7);return eventsOn(d.toISOString().slice(0,10)).filter(e=>e.title==="Заказ льда").length})()'),1);
+t.run('A.settings();importBackup({text:JSON.stringify({data:{invoices:[null]},step:"app"})})');
+assert.equal(t.state().data.invoices.length,3);
+const copy=JSON.stringify(t.state());
+t.context.backup={text:copy};t.run("importBackup(backup)");
+assert.equal(t.state().data.counts.length,1);
+t.run('A.home();A.demo();A.tab({t:"stock"});S.order=[];save();A.home();A.own()');
+assert.equal(t.state().order[0].qty,"2,5");
+t.run('A.tab({t:"receiving"})');
+const lines=Array.from({length:2500},(_,i)=>'Позиция '+i+';1;100;100;шт;Поставщик;23.11.2026;LARGE');
+const start=performance.now();
+await upload("invoice","large.csv",header+'\n'+lines.join('\n')+'\nИтого;;;250000');text(/В реестре сохранено 2500 строк/);
+const ms=Math.round(performance.now()-start);
+assert.equal(t.state().data.invoices.at(-1).rows.length,2500);
+assert.equal(t.state().data.invoices.at(-1).sum,250000);
+t=test();assert.equal(t.state().data.invoices.length,4);
+assert.equal(t.run('readNumber("1 234 567,89 ₽")'),1234567.89);
+assert.equal(t.run('parseDoc(parseCSV("Позиция;Сумма;Причина\\nЯблоко;240;порча"),"writeoff").type'),"writeoff");
+assert.equal(t.run('parseDoc(parseCSV("Причина;Сумма\\nПорча;240"),"writeoff").type'),"writeoff");
+t.run('A.tab({t:"reports"});A.close()');
+await upload("sales","sales.csv","Позиция;Количество;Сумма\nЯблочный сок;2;500");
+text(/Продажи: 1 позиций/);
+assert.doesNotMatch(t.run("vToday()"),/≈ 24,6%/);
+await upload("inv","inventory.csv","Позиция;Учёт;Факт;Единица\nБез цены;2;1;кг\nЯблоко;2;3;кг");
+assert.equal(t.state().data.counts[0].short,0);
+assert.equal(t.state().data.counts[0].unpriced,1);
+assert.equal(t.run("possibleResort(S.data.counts[0])"),false);
+t.run('A.tab({t:"receiving"})');
+const persist=t.context.localStorage.setItem;
+t.context.localStorage.setItem=()=>{throw new Error("QuotaExceededError");};
+await upload("invoice","quota.csv",good("NEXT"));
+text(/Не удалось сохранить данные в браузере/);
+assert.equal(t.run("S.data.invoices.length"),4);
+assert.equal(t.state().data.invoices.length,4);
+t.context.localStorage.setItem=persist;
+const legacy=t.state();
+legacy.data.invoices=[{id:"old",src:"receiving.invoice",date:"2026-10-02",supplier:"Фрукты",status:"получена",sum:220,rows:[{pos:"Яблоко",qty:2,unit:"кг",price:110,sum:220}]}];
+legacy.tab="receiving";
+t=test(legacy);
+text(/2 окт/);
+await upload("invoice","new.csv",good("NEW"));
+assert.equal(t.state().data.invoices.length,2);
+t.run('A.receivingsources()');
+text(/Папка Google Drive/);text(/Google Таблица/);text(/Прямая ссылка на файл/);
+const calls=[];
+const queue=[{id:1,name:"outer.csv",source:"drive"},{id:2,name:"bad.csv",source:"sheets"}];
+t.context.fetch=async (url,opts)=>{
+  calls.push({url,auth:opts.headers?.Authorization});
+  if(url==="/api/intake")return Response.json({documents:queue});
+  if(url==="/api/intake/documents/1")return new Response(good("QUEUE"),{headers:{"content-type":"application/octet-stream"}});
+  if(url==="/api/intake/documents/2")return new Response(good("WRONG","20.11.2026","101","300"),{headers:{"content-type":"application/octet-stream"}});
+  if(url.endsWith("/reviewed"))return Response.json({ok:true});
+  if(url==="https://service.invalid/export.csv"){
+    assert.equal(opts.credentials,"omit");
+    return new Response(good("DIRECT"),{headers:{"content-type":"text/csv"}});
+  }
+  throw new Error("Unexpected fetch "+url);
+};
+const submit=async (f,values,id)=>{t.context.testForm={dataset:{f,id},values,reset(){}};await t.run("submitIncoming(testForm)");};
+await submit("connectintake",{token:"test-fixture"});
+assert.equal(t.run("incoming.queue.length"),2);
+await submit("importqueue",{kind:"invoice"},"2");
+assert.match(t.run("incoming.notice"),/проверьте количество и сумму/);
+assert.equal(t.run("incoming.queue.length"),2);
+assert.ok(!calls.some(c=>c.url.endsWith("/2/reviewed")));
+await submit("importqueue",{kind:"invoice"},"1");
+assert.equal(t.run("incoming.queue.length"),1);
+assert.ok(calls.some(c=>c.url.endsWith("/1/reviewed")));
+await submit("directintake",{kind:"invoice",link:"https://service.invalid/export.csv"});
+assert.equal(t.run("incoming.notice"),"Документ по ссылке загружен.");
+assert.ok(!calls.find(c=>c.url==="https://service.invalid/export.csv").auth);
+assert.equal(t.state().data.invoices.length,4);
+t.run('S.ans.problem="Накладные и цены";S.ans.access="Выгрузки через бухгалтера";S.ans.flow=["Бумажные накладные"];S.data.invoices=[];A.tab({t:"today"})');
+text(/Запросите выгрузку у бухгалтера/);text(/бумажной накладной/);
+t.run('S.ans.problem="Техкарты и себестоимость";S.sec.cards.q.where="На бумаге";S.sec.cards.q.prep="Да";render()');
+text(/Перенесите карту в таблицу/);text(/Для заготовок укажите выход замеса/);
+t.run('S.ans.problem="Заказы поставщикам";render()');text(/Проверить заказ/);
+t.run('S.ans.problem="Инвентаризация и расхождения";S.sec.stock.q.freq="Раз в месяц";render()');text(/Плановый ориентир/);
+assert.equal(t.run('scheduleCount("2026-01-31",[0,1])'),"2026-02-28");
+t.run('A.survey();A.pick({n:"ans.access",v:"Доступа нет"});A.close()');
+t=test();assert.equal(t.state().ans.access,"Доступа нет");
+assert.equal(t.state().sec.cards.q.where,"На бумаге");
+const batch=test({mode:"own",step:"app",tab:"receiving",ans:{problem:"Накладные и цены",system:"iiko"}});
+const queueItems=Array.from({length:51},(_,i)=>({id:i+1,name:"invoice-"+(i+1)+".csv",source:"external"}));
+const reviewed=new Set();
+const bodyFor=(id,bad=false)=>header+"\n"+Array.from({length:50},(_,row)=>
+  [row===0&&id===50?"Сироп бузины":"Товар "+(row+1),1,100,bad&&row===0?500:100,"шт",id%2===0?"Ёлка":"Линия","20.11.2026","B-"+id].join(";")
+).join("\n")+"\nИтого;;;5000";
+batch.context.fetch=async(url,options)=>{
+  assert.equal(options.headers.Authorization,"Bearer batch-fixture");
+  if(url==="/api/intake"){
+    const pending=queueItems.filter(item=>!reviewed.has(item.id));
+    return Response.json({documents:pending.slice(0,25),next_cursor:pending.length>25?pending[24].id:null});
+  }
+  if(url.startsWith("/api/intake?after_id=")){
+    const cursor=Number(url.split("=").at(-1));
+    const pending=queueItems.filter(item=>item.id>cursor&&!reviewed.has(item.id));
+    return Response.json({documents:pending,next_cursor:null});
+  }
+  const match=url.match(/^\/api\/intake\/documents\/(\d+)(\/reviewed)?$/);
+  assert.ok(match,url);
+  const id=Number(match[1]);
+  if(match[2]){
+    assert.equal(options.method,"POST");
+    reviewed.add(id);
+    return Response.json({ok:true});
+  }
+  return new Response(bodyFor(id,id===51),{headers:{"content-type":"application/octet-stream"}});
+};
+const sendBatch=async(f,values,id)=>{
+  batch.context.form={dataset:{f,id:id?String(id):undefined},values,reset(){}};
+  await batch.run("submitIncoming(form)");
+};
+batch.run("A.receivingsources()");
+await sendBatch("connectintake",{token:"batch-fixture"});
+assert.match(batch.run("incomingQueue()"),/Показать следующие документы/);
+await batch.run("A.queuemore()");
+assert.equal(batch.run("incoming.queue.length"),51);
+const batchStart=performance.now();
+for(let id=1;id<=51;id++)await sendBatch("importqueue",{kind:"invoice"},id);
+const batchTime=Math.round(performance.now()-batchStart);
+assert.equal(reviewed.size,50);
+assert.equal(batch.state().data.invoices.length,50);
+assert.equal(batch.state().data.invoices.reduce((n,i)=>n+i.rows.length,0),2500);
+assert.deepEqual(JSON.parse(batch.run("JSON.stringify(incoming.queue.map(x=>x.id))")),[51]);
+assert.match(batch.run("incoming.notice"),/проверьте количество и сумму/);
+batch.run("A.close()");
+assert.doesNotMatch(batch.body(),/data-doc="invoice"/);
+assert.match(batch.body(),/Накладных: 50/);
+assert.equal((batch.body().match(/data-invoice-id=/g)||[]).length,25);
+batch.run("A.invoicemore()");
+assert.equal((batch.get("invoice-results").innerHTML.match(/data-invoice-id=/g)||[]).length,50);
+batch.appEvents.input({target:{id:"invoice-search",value:"елка бузины",dataset:{}}});
+assert.match(batch.get("invoice-results").innerHTML,/Найдено: 1 из 50/);
+assert.match(batch.get("invoice-results").innerHTML,/B-50/);
+assert.doesNotMatch(batch.get("invoice-results").innerHTML,/<table/);
+const holder={firstChild:null};
+batch.appEvents.toggle({target:{open:true,dataset:{invoiceId:batch.state().data.invoices[49].id},querySelector:()=>holder}});
+assert.match(holder.innerHTML,/Сироп бузины/);
+batch.appEvents.input({target:{id:"invoice-search",value:"нет такого",dataset:{}}});
+assert.match(batch.get("invoice-results").innerHTML,/Ничего не найдено/);
+console.log("PASS queue batch: 50 valid invoices × 50 rows, one invalid retained; search, lazy details, register pagination ("+batchTime+" ms in JS harness)");
+
+t.run('S.venue.stockName="Напитки";S.data.stock={};S.data.counts=[];S.draft=null;delete S.sec.stock.docs.rest;A.tab({t:"stock"});A.close()');
+const uploadBook=async(doc,name,cols,rows)=>{
+  const workbook=xlsx.utils.book_new();
+  xlsx.utils.book_append_sheet(workbook,xlsx.utils.aoa_to_sheet([...cols,...rows]),name);
+  t.context.example=new File([xlsx.write(workbook,{type:"buffer",bookType:"xlsx"})],name+".xlsx");
+  return t.run('handleFile("stock","'+doc+'",example)');
+};
+assert.equal(await uploadBook("rest","Склад",[["Остатки на складах"],["На 28.10.2026"],["Название товара","Ед. изм.","Напитки","Кухня","Итого"]],[["Сироп","л",4,99,103]]),"preview");
+await t.run("commitWorkbookPreview()");
+assert.equal(t.state().data.stock["Сироп"].qty,4);
+assert.equal(await uploadBook("inv","Факт",[["Бланк инвентаризации"],["На дату:","","28.10.2026"],["Склад","","Напитки"],["Товар","","","","","Ед. изм.","Остаток фактический"],["Код","","","Наименование"]],[["TEST","","","Сироп","","л",0]]),"preview");
+text(/Совпали с учётом по названию и единице: 1/);
+await t.run("commitWorkbookPreview()");
+assert.equal(t.state().draft.rows["Сироп"],"0");
+assert.equal(t.state().draft.reference["Сироп"].qty,4);
+t.run('A.invsave()');
+assert.equal(t.state().data.counts[0].rows[0].book,4);
+assert.equal(t.state().data.counts[0].rows[0].fact,0);
+assert.equal(t.state().data.stock["Сироп"].qty,4);
+t.run('A.tab({t:"reports"})');
+for(const key of JSON.parse(t.run('JSON.stringify(REPORTS.flatMap(g=>g[2].map(r=>r[0])))'))){t.run('A.report({k:"'+key+'"});A.close()');}
+console.log("PASS. Manager workflow through application actions, import including TSV, wrong types, duplicate, totals and invalid date, price scope, findings and calendar, local answer, draft, order, backup, demo isolation, 2500 rows ("+ms+" ms in JS harness).");
+})().catch(e=>{console.error(e);process.exit(1);});

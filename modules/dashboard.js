@@ -10,7 +10,7 @@ function onboarding(){
   const st=S.step, n={who:1,venue:2,three:3}[st];
   const top=n?`<div class="head"><div class="bar">${[1,2,3].map(i=>`<span class="${i<=n?"on":""}"></span>`).join("")}</div><div class="between"><span class="muted">Шаг ${n} из 3</span><button class="link" data-a="back">Назад</button></div></div>`:"";
   if(st==="start") return `<div class="main hero">
-   <div class="between"><span class="row"><span class="seal" aria-hidden="true">B</span><span class="logo">BarManager AI</span></span><button class="icon-btn" data-a="theme">${effTheme()==="dark"?"Светлая":"Тёмная"}</button></div>
+   <div class="between"><span class="row"><span class="seal" aria-hidden="true">D</span><span class="logo">DashBar</span></span><button class="icon-btn" data-a="theme">${effTheme()==="dark"?"Светлая":"Тёмная"}</button></div>
    <div class="rule"></div>
    <h1>Управление баром</h1>
    <p class="sub">Приложение следит за накладными, ценами, техкартами и инвентаризацией. Находит отклонение, объясняет причину и предлагает решение. Решаете вы.</p>

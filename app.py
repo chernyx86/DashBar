@@ -1,4 +1,4 @@
-"""Single-venue intake service for the BarManager browser prototype."""
+"""Single-venue intake service for the DashBar browser prototype."""
 
 import asyncio
 import csv

@@ -43,7 +43,7 @@ function invoicesByDate(){
   return S.data.invoices.slice().reverse().sort((a,b)=>b.date.localeCompare(a.date));
 }
 function invoiceReceiptStatus(invoice){
-  if(invoice.receiptAt)return "На приходе BarManager";
+  if(invoice.receiptAt)return "На приходе DashBar";
   return invoice.status==="проведена"?"Проведена":"Ожидает прихода";
 }
 function invoiceResults(invoices){
@@ -108,7 +108,7 @@ function blankOcrRow(){return {pos:"",unit:"",qty:"",netPrice:"",netSum:"",vat:"
 function renderOcr(s){
   const input=(label,key,value,index)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
     ${["qty","netPrice","netSum","vat","gross","total"].includes(key)?'inputmode="decimal"':key==="date"?'type="date"':""} value="${esc(value)}" required></label>`;
-  return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":"распознано на сервере BarManager"}</p>
+  return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":"распознано на сервере DashBar"}</p>
     <p>Сверьте поставщика, дату, фасовку, количество, цену, НДС и итог с оригиналом. Все поля можно исправить.</p>
     ${s.mode==="local-ocr"&&!s.detectedRows?'<p class="muted">Строки таблицы не распознаны. Сверьте документ по изображению или загрузите выгрузку ЭДО.</p>':""}
     ${s.preview.length?`<details class="card" open><summary>Изображение документа</summary>

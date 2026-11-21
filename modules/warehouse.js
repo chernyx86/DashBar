@@ -66,14 +66,14 @@ function postReceipt(id){
       S.data.receipts=S.data.receipts.concat({invoiceId:invoice.id,date,warehouse,receiptAt,rows});
       S.data.invoices=S.data.invoices.map(item=>item.id===invoice.id?{...item,receiptAt}:item);
     });
-    render(true);toast("Приход отражён на складе BarManager");
+    render(true);toast("Приход отражён на складе DashBar");
   }catch(e){toast(e.message);}
 }
 function stockReceiptsBlock(){
   if(!S.data.receipts.length)return "";
   const baseDate=S.sec.stock.docs.rest?.res?.snapshot?.date;
   const recent=S.data.receipts.slice(-10).reverse();
-  return `<div class="sec"><h2>Приходы в BarManager</h2><p class="muted">Проведено: ${S.data.receipts.length}. ${baseDate?"На остаток влияют приходные движения позже "+ruDate(baseDate)+". ":""}Изменения отражаются в локальном складе.</p>
+  return `<div class="sec"><h2>Приходы в DashBar</h2><p class="muted">Проведено: ${S.data.receipts.length}. ${baseDate?"На остаток влияют приходные движения позже "+ruDate(baseDate)+". ":""}Изменения отражаются в локальном складе.</p>
     ${table(["Дата","Склад","Строк"],recent.map(entry=>[ruDate(entry.date),entry.warehouse,String(entry.rows.length)]))}
     <details class="card"><summary>Текущие остатки с приходами</summary>${table(["Позиция","Количество"],stockEntries().map(([name,item])=>[name,fmt(item.qty,4)+" "+item.unit]))}</details></div>`;
 }

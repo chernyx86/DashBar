@@ -3,7 +3,7 @@ const VIEW={today:vToday,receiving:vReceiving,stock:vStock,cards:vCards,reports:
 function shell(){
   const tb=tabs(), t=S.tab, ini=(S.user.name.trim()[0]||"Б").toUpperCase();
   return `${isDemo()?`<div class="banner">Пример · вымышленный бар · цифры условные <button class="link" data-a="home" style="padding:0 0 0 8px;font-size:12px;text-decoration:underline">Выйти</button></div>`:""}
-  <div class="head"><div class="head-row"><div class="row brand-row"><span class="seal" aria-hidden="true">B</span><span class="eyebrow">${esc(venueName())}</span></div><div class="row"><button class="icon-btn" data-a="theme" aria-label="Переключить тему">${effTheme()==="dark"?"Светлая":"Тёмная"}</button><button class="avatar" data-a="settings" aria-label="Профиль и настройки">${esc(ini)}</button></div></div>
+  <div class="head"><div class="head-row"><div class="row brand-row"><span class="seal" aria-hidden="true">D</span><span class="eyebrow">${esc(venueName())}</span></div><div class="row"><button class="icon-btn" data-a="theme" aria-label="Переключить тему">${effTheme()==="dark"?"Светлая":"Тёмная"}</button><button class="avatar" data-a="settings" aria-label="Профиль и настройки">${esc(ini)}</button></div></div>
    <div class="row"><h1>${TITLE[t]}</h1>${q(t==="today"||t==="ai"||t==="reports"?"stats":t)}</div>${t==="today"?`<span class="sub">${todayLabel()}</span>`:!isDemo()&&SEC[t]&&!secOn(t)?`<span class="sub">Раздел ещё не включён</span>`:""}</div>
   <div class="main" id="main">${VIEW[t]()}</div>
   ${t==="ai"?`<form class="composer" data-f="chat"><input class="in" id="chat-in" placeholder="Спросите про бар" autocomplete="off" aria-label="Сообщение" value="${esc(draft)}"><button class="btn p" ${chatBusy?"disabled":""}>${chatBusy?"…":"Спросить"}</button></form>`:""}
@@ -271,7 +271,7 @@ const A={
    S.sec.stock.docs.inv={name:"Инвентаризация "+d.date,res,local:true};
    S.draft=null;sheet=null;render();toast("Инвентаризация сохранена");
  },
- export:()=>{download("barmanager-"+todayISO()+".json",JSON.stringify(S,null,2),"application/json");toast("Копия скачана");},
+ export:()=>{download("dashbar-"+todayISO()+".json",JSON.stringify(S,null,2),"application/json");toast("Копия скачана");},
  eventnew:()=>{sheet={t:"event",rep:"none",date:days()[S.day].iso};render(true);},
  evrep:d=>{sheet.title=document.getElementById("ev-title").value;sheet.date=document.getElementById("ev-date").value;sheet.rep=d.v;render(true);},
  evsave:()=>{
@@ -364,7 +364,7 @@ function importBackup(file){
   r.onload=()=>{
     try{
       const v=JSON.parse(r.result);
-      if(!v||typeof v!=="object"||!v.data)throw new Error("Это не резервная копия BarManager");
+      if(!v||typeof v!=="object"||!v.data)throw new Error("Это не резервная копия DashBar");
       const candidate=merge(blank(),v.v===1?migrate(v):v);
       const defaults=blank();
       const validShape=(value,example)=>Array.isArray(example)?Array.isArray(value):
