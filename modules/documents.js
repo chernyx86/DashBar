@@ -135,9 +135,9 @@ function parseDoc(rows,hint){
   }
   if(hi<0)return null;
   const C={};Object.keys(H).forEach(k=>C[k]=col(head,H[k]));
-  const body=rows.slice(hi+1).filter(r=>r&&r.some(x=>String(x==null?"":x).trim()!==""));
-  const get=(r,k)=>{const i=C[k];return i>=0?cellText(r[i]):"";};
-  const out=body.map((r,index)=>({
+  const body=rows.slice(hi+1);
+  const get=(r,k)=>{const i=C[k];return i>=0?cellText(r?.[i]):"";};
+  const out=body.map((r=[],index)=>({
     sourceLine:hi+2+index,
     pos:get(r,"pos"),book:get(r,"book"),fact:get(r,"fact"),qty:get(r,"qty"),price:get(r,"price"),
     sum:get(r,"sum"),unit:get(r,"unit"),supplier:get(r,"supplier"),reason:get(r,"reason"),
@@ -169,6 +169,14 @@ function parseDate(value){
   const iso=m.slice(1).join("-");
   const d=new Date(iso+"T12:00:00Z");
   return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===iso?iso:"";
+}
+function salesPeriod(metadata){
+  const text=metadata.flat().map(cellText).join(" ");
+  const date=String.raw`(?:\d{4}-\d{2}-\d{2}|\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4})`;
+  const match=text.match(new RegExp(`(?:^|\\s)с\\s+(${date})\\s+по\\s+(${date})(?=\\s|$|[.,;])`,"i"));
+  if(!match)return null;
+  const start=parseDate(match[1]), end=parseDate(match[2]);
+  return start&&end&&end>=start?{start,end}:null;
 }
 function findDate(rows){
   for(const row of rows.slice(0,10)){
@@ -483,7 +491,7 @@ function applyDoc(sec,docKey,parsed){
   const F=[];
   if(parsed.type==="inventory"){
     const rows=parsed.rows.filter(r=>!(/^(?:итого|всего)$/.test(receiveKey(r.pos))))
-      .map(r=>({pos:r.pos,unit:r.unit||S.data.stock[r.pos]?.unit||"",book:readNumber(r.book),fact:readNumber(r.fact)}));
+      .map(r=>({pos:r.pos,unit:r.unit||S.data.stock[r.pos]?.unit||"",book:readNumber(r.book),fact:readNumber(r.fact),sourceLine:r.sourceLine}));
     const invalid=rows.find(r=>!r.pos||!Number.isFinite(r.book)||!Number.isFinite(r.fact)||r.fact<0);
     if(invalid)throw new Error(`Проверьте учёт и факт в строке «${invalid.pos||"без названия"}».`);
     if(!rows.length)throw new Error("В ведомости нет строк с учётным и фактическим остатком.");
@@ -506,7 +514,7 @@ function applyDoc(sec,docKey,parsed){
     });
     const totals={short,over,unpriced};
     if(possibleResort(totals)){
-      F.unshift({title:"Возможная пересортица",detail:`Недостачи ${money(short)}, излишки ${money(over)}: суммы почти равны. Товар не пропал, а списан не с той позиции.`,solution:"Сверять группы суммой, а не по вкусам.",value:"пересортица",n:1});
+      F.unshift({title:"Возможная пересортица",detail:`Недостачи ${money(short)}, излишки ${money(over)}: суммы почти равны. Возможная причина — списание с другой позиции. Проверьте по документам.`,solution:"Сверять группы суммой, а не по вкусам.",value:"пересортица",n:1});
     }
     const date=parsed.date||todayISO();
     S.data.counts=S.data.counts.filter(c=>c.src!==src);
@@ -538,9 +546,10 @@ function applyDoc(sec,docKey,parsed){
     if(low.length)F.push({title:`Нулевой остаток: ${low.length} позиций`,detail:low.slice(0,5).map(r=>r.pos).join(", "),solution:"Проверить и добавить в заказ.",value:String(low.length)});
   }
   else if(parsed.type==="sales"){
-    const rows=parsed.rows.map(r=>({pos:r.pos,qty:num(r.qty),sum:num(r.sum)||num(r.qty)*num(r.price),category:r.category||"",src})).filter(r=>r.pos);
+    const rows=parsed.rows.map(r=>({pos:r.pos,qty:num(r.qty),sum:num(r.sum)||num(r.qty)*num(r.price),category:r.category||"",unit:r.unit||"",qtyKnown:Number.isFinite(readNumber(r.qty)),src})).filter(r=>r.pos);
     S.data.sales=S.data.sales.filter(r=>r.src!==src).concat(rows);
     const total=rows.reduce((a,r)=>a+(r.sum||0),0);
+    res.usagePeriod=salesPeriod(parsed.metadata);
     res.summary=`Продажи: ${rows.length} позиций на ${money(total)}.`;
   }
   else if(parsed.type==="writeoff"){

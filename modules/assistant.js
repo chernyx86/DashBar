@@ -12,13 +12,20 @@ ${data}
 function localAnswer(text){
   const t=text.toLowerCase(), L=[];
   const f=findings().filter(open);
-  const priceOf=p=>S.data.prices[p]?num(S.data.prices[p].price):0;
   if(/инвентар|расхожд|пересорт|недостач|излиш/.test(t)){
     const c=S.data.counts[0];
     if(c){
       L.push(`Последняя инвентаризация ${ruDate(c.date)}: ${inventoryTotals(c)}.`);
-      const rows=c.rows.filter(r=>r.fact!==r.book).sort((a,b)=>Math.abs((b.fact-b.book)*priceOf(b.pos))-Math.abs((a.fact-a.book)*priceOf(a.pos))).slice(0,5);
-      if(rows.length)L.push("Сильнее всего расходится:\n"+rows.map(r=>`• ${r.pos}: учёт ${fmt(r.book)}, факт ${fmt(r.fact)} (${r.fact-r.book>0?"+":"−"}${fmt(Math.abs(r.fact-r.book))})`).join("\n"));
+      const rows=c.rows.filter(r=>Number.isFinite(r.fact)&&Number.isFinite(r.book)&&r.fact!==r.book)
+        .sort((a,b)=>Math.abs(num(b.sum))-Math.abs(num(a.sum))).slice(0,5);
+      const [section,doc]=String(c.src||"").split(".");
+      const source=S.sec[section]?.docs?.[doc]?.name;
+      if(rows.length)L.push("Подтверждённые расхождения:\n"+rows.map(r=>{
+        const diff=r.fact-r.book, unit=r.unit?" "+r.unit:"";
+        const origin=source&&r.sourceLine?` · ${source}, строка ${r.sourceLine}`:"";
+        return `• ${r.pos}: учёт ${fmt(r.book)}${unit}, факт ${fmt(r.fact)}${unit} (${diff>0?"+":"−"}${fmt(Math.abs(diff))}${unit})${origin}`;
+      }).join("\n"));
+      if(rows.length)L.push("Сверьте движения за период и проверьте единицы измерения до корректировки учёта.");
       if(possibleResort(c))L.push("Суммы почти равны. Возможна пересортица. Сверьте позиции по товарным группам.");
     } else L.push("Инвентаризаций пока нет. Загрузите сличительную ведомость в «Склад» — тогда покажу расхождения и пересортицу.");
   } else if(/цен|накладн|поставщик|дорог|матриц/.test(t)){
@@ -27,17 +34,17 @@ function localAnswer(text){
     else L.push("Отклонений цен не видно: либо всё в пределах 5%, либо не хватает накладных или матрицы цен.");
     if(!isDemo()&&!Object.keys(S.data.prices).length)L.push("Матрица цен пуста — загрузите её в «Приёмке».");
   } else if(/заказ|заканч|остат|хватит/.test(t)){
-    const stock=stockEntries(), low=[];
+    const stock=stockEntries(), usage=stockUsage(), low=[];
     for(const [pos,item] of stock){
-      const qty=num(item.qty), use=dailyUse(pos);
+      const qty=num(item.qty), use=dailyUse(pos,item.unit,usage);
       if(qty<=0||use>0&&qty/use<=S.set.lowDays)low.push({pos,qty,days:qty<=0?0:qty/use});
     }
     low.sort((a,b)=>a.days-b.days);
     if(low.length)L.push("Заканчивается:\n"+low.slice(0,6).map(({pos,qty,days})=>
       `• ${pos}: остаток ${fmt(qty)}, ${qty<=0?"проверьте наличие":`хватит на ${fmt(days,1)} дн.`}`).join("\n"));
     if(!stock.length)L.push("Остатков пока нет. Загрузите отчёт об остатках в разделе «Склад».");
-    else if(!S.data.sales.length)L.push("Для расчёта запаса в днях загрузите продажи за месяц.");
-    else if(!low.length)L.push("По позициям с известным расходом запас выше заданного порога.");
+    else if(!usage.duration)L.push(usage.note);
+    else if(!low.length)L.push("Среди позиций с сопоставимыми продажами запас ниже порога не найден.");
   } else if(/техкарт|ттк|себестоим|калькуляц/.test(t)){
     const c=f.filter(x=>x.sec==="cards");
     L.push(c.length?"По техкартам открыто:\n"+c.slice(0,4).map(x=>"• "+x.title).join("\n"):"По техкартам открытых находок нет. Загрузите рабочие ТТК в «Техкартах».");

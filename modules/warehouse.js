@@ -102,19 +102,40 @@ function vStock(){
   ${orderBlock()}
   ${secFindings("stock")}`;
 }
-function lowStockBlock(){
-  const rows=[];
-  for(const [p,item] of stockEntries()){
-    const q=num(item.qty), u=dailyUse(p);
-    if(u>0){const d=q/u; if(d<=S.set.lowDays) rows.push([p,fmt(q),fmt(d,0)+" дн."]);}
-    else if(q<=0) rows.push([p,fmt(q),"нет расхода"]);
-  }
-  if(!rows.length) return `<div class="card"><p class="muted">Пока нечего считать: нужны остатки и продажи. Или запас в днях не подходит к порогу.</p></div>`;
-  return `<div class="list">${rows.slice(0,10).map(r=>`<div class="li"><div><b>${esc(r[0])}</b><span class="muted">остаток ${esc(r[1])}</span></div><span class="val">${esc(r[2])}</span></div>`).join("")}</div>`;
+function stockUsage(){
+  const sales=S.sec.reports.docs.sales;
+  const period=sales?.res?.usagePeriod;
+  const snapshot=S.sec.stock.docs.rest?.res?.snapshot?.date;
+  if(!S.data.sales.length)return {note:"Загрузите продажи бара в разделе «Отчёты»."};
+  if(!period)return {note:"Для расчёта нужен период продаж. Укажите над таблицей «с ДД.ММ.ГГГГ по ДД.ММ.ГГГГ»."};
+  const {start,end}=period;
+  if(typeof start!=="string"||typeof end!=="string"||!start||!end||
+      parseDate(start)!==start||parseDate(end)!==end||end<start)return {note:"Проверьте даты периода продаж."};
+  if(!snapshot)return {note:"Для расчёта загрузите датированный снимок остатков."};
+  if(snapshot<end)return {note:"Снимок остатков старше отчёта о продажах. Загрузите более свежие остатки."};
+  const duration=(Date.parse(end)-Date.parse(start))/86400000+1;
+  return {duration,note:`Остатки на ${ruDate(snapshot)}. Продажи с ${ruDate(start)} по ${ruDate(end)} · ${sales.name||"отчёт"}.`};
 }
-function dailyUse(pos){
-  const s=S.data.sales.filter(x=>x.pos===pos).reduce((a,b)=>a+num(b.qty),0);
-  return s/30;
+function dailyUse(pos,unit,usage=stockUsage()){
+  const key=receiveUnit(unit);
+  if(!usage.duration||!key)return null;
+  const rows=S.data.sales.filter(row=>row.src==="reports.sales"&&row.pos===pos&&
+    !/(кухн|кальян|хука)/i.test(row.category||""));
+  if(!rows.length||rows.some(row=>row.qtyKnown===false||receiveUnit(row.unit)!==key))return null;
+  const total=rows.reduce((sum,row)=>sum+num(row.qty),0);
+  return total>=0?total/usage.duration:null;
+}
+function lowStockBlock(){
+  const usage=stockUsage(), rows=[];
+  for(const [p,item] of stockEntries()){
+    const q=num(item.qty), u=dailyUse(p,item.unit,usage);
+    if(q<=0)rows.push([p,fmt(q),"нулевой остаток"]);
+    else if(u>0&&q/u<=S.set.lowDays)rows.push([p,fmt(q),fmt(q/u,1)+" дн."]);
+  }
+  const note=`<p class="muted">${esc(usage.note)}</p>`;
+  if(!rows.length)return `<div class="card">${note}${usage.duration?
+    '<p class="muted">Среди позиций с сопоставимыми продажами запас ниже порога не найден.</p>':""}</div>`;
+  return note+`<div class="list">${rows.slice(0,10).map(r=>`<div class="li"><div><b>${esc(r[0])}</b><span class="muted">остаток ${esc(r[1])}</span></div><span class="val">${esc(r[2])}</span></div>`).join("")}</div>`;
 }
 function orderBlock(){
   const rows=S.order;
@@ -132,9 +153,9 @@ function orderText(){
   return "Заказ, "+venueName()+":\n"+S.order.map(r=>"• "+r.pos+": "+fmt(readNumber(r.qty),4)+(r.unit?" "+r.unit:"")).join("\n");
 }
 function suggestOrder(){
-  const out=[];
+  const usage=stockUsage(), out=[];
   for(const [p,item] of stockEntries()){
-    const q=num(item.qty), u=dailyUse(p), unit=item.unit||"";
+    const q=num(item.qty), unit=item.unit||"", u=dailyUse(p,unit,usage);
     if(u>0){const d=q/u; if(d<=S.set.lowDays) out.push({pos:p,qty:Math.max(1,Math.ceil(u*7-q)),unit});}
   }
   return out;
