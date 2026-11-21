@@ -6,7 +6,7 @@ function shell(){
   <div class="head"><div class="head-row"><div class="row brand-row"><span class="seal" aria-hidden="true">D</span><span class="eyebrow">${esc(venueName())}</span></div><div class="row"><button class="icon-btn" data-a="theme" aria-label="Переключить тему">${effTheme()==="dark"?"Светлая":"Тёмная"}</button><button class="avatar" data-a="settings" aria-label="Профиль и настройки">${esc(ini)}</button></div></div>
    <div class="row"><h1>${TITLE[t]}</h1>${q(t==="today"||t==="ai"||t==="reports"?"stats":t)}</div>${t==="today"?`<span class="sub">${todayLabel()}</span>`:!isDemo()&&SEC[t]&&!secOn(t)?`<span class="sub">Раздел ещё не включён</span>`:""}</div>
   <div class="main" id="main">${VIEW[t]()}</div>
-  ${t==="ai"?`<form class="composer" data-f="chat"><input class="in" id="chat-in" placeholder="Спросите про бар" autocomplete="off" aria-label="Сообщение" value="${esc(draft)}"><button class="btn p" ${chatBusy?"disabled":""}>${chatBusy?"…":"Спросить"}</button></form>`:""}
+  ${t==="ai"?`<form class="composer${assistantAvailable()?" composer-external":""}" data-f="chat"><input class="in" id="chat-in" maxlength="700" placeholder="Спросите про бар" autocomplete="off" aria-label="Сообщение" value="${esc(draft)}"><button class="btn p" ${chatBusy?"disabled":""}>${chatBusy?"…":"Спросить"}</button>${assistantAvailable()?`<button class="btn" name="external" ${chatBusy?"disabled":""}>Спросить ИИ</button>`:""}</form>`:""}
   <nav class="nav" style="grid-template-columns:repeat(${tb.length},1fr)" aria-label="Разделы">${tb.map(x=>`<button data-a="tab" data-t="${x[0]}" ${t===x[0]?'aria-current="page"':""}><svg viewBox="0 0 24 24" aria-hidden="true">${ICON[x[0]]}</svg>${x[1]}${!isDemo()&&SEC[x[0]]&&!secOn(x[0])?'<span class="lock" title="Не включён"></span>':""}</button>`).join("")}</nav>`;
 }
 /* ================= Нижние листы ================= */
@@ -357,7 +357,7 @@ app.addEventListener("submit",ev=>{
   ev.preventDefault();
   if(ev.target.dataset.f==="confirmocr")return confirmOcr();
   if(["directintake","connectintake","configureintake","importqueue","queuedexports"].includes(ev.target.dataset.f))return submitIncoming(ev.target);
-  if(ev.target.dataset.f==="chat"){const el=document.getElementById("chat-in");const v=el.value.trim();if(v&&!chatBusy){draft="";sendChat(v);}}
+  if(ev.target.dataset.f==="chat"){const el=document.getElementById("chat-in");const v=el.value.trim();if(v&&!chatBusy){draft="";sendChat(v,ev.submitter?.name==="external");}}
 });
 function importBackup(file){
   const r=new FileReader();

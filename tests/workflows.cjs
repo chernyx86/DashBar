@@ -225,6 +225,42 @@ batch.appEvents.toggle({target:{open:true,dataset:{invoiceId:batch.state().data.
 assert.match(holder.innerHTML,/Сироп бузины/);
 batch.appEvents.input({target:{id:"invoice-search",value:"нет такого",dataset:{}}});
 assert.match(batch.get("invoice-results").innerHTML,/Ничего не найдено/);
+for(const invoice of batch.state().data.invoices.slice(0,10)){
+  batch.context.receiptId=String(invoice.id);
+  batch.run("postReceipt(receiptId);postReceipt(receiptId)");
+}
+assert.equal(batch.state().data.receipts.length,10);
+assert.equal(batch.run('effectiveStock()["Товар 1"].qty'),10);
+assert.equal(test().run('effectiveStock()["Товар 1"].qty'),10);
+batch.run('S.data.stock["Пустая полка"]={qty:0,unit:"шт"};S.data.sales=[];A.tab({t:"ai"})');
+assert.match(batch.run('localAnswer("Что заканчивается?")'),/Пустая полка.*проверьте наличие/);
+assert.match(batch.run('localAnswer("Что заканчивается?")'),/загрузите продажи/);
+assert.doesNotMatch(batch.body(),/name="external"/);
+batch.run('incoming.assistantAvailable=true;render()');
+assert.match(batch.body(),/Спросить ИИ/);
+let aiRequests=0;
+batch.context.fetch=async (url,options)=>{
+  aiRequests++;
+  assert.equal(url,"/api/intake/assistant");
+  const payload=JSON.parse(options.body);
+  assert.equal(payload.question,"Что заканчивается?");
+  assert.equal(payload.context.invoices,50);
+  assert.ok(!options.body.includes("Пустая полка"));
+  return Response.json({answer:"Сверьте дефицит с последней инвентаризацией."});
+};
+await batch.run('sendChat("Что заканчивается?")');
+assert.equal(aiRequests,0);
+const submitChat=batch.appEvents.submit;
+batch.get("chat-in").value="Что заканчивается?";
+submitChat({target:{dataset:{f:"chat"}},submitter:{name:"external"},preventDefault(){}});
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(aiRequests,1);
+assert.match(batch.body(),/Ответ внешнего ИИ/);
+assert.match(batch.body(),/Пустая полка/);
+batch.context.fetch=async ()=>new Response("Unavailable",{status:502});
+await batch.run('sendChat("Что заканчивается?",true)');
+assert.match(batch.body(),/Внешний ИИ недоступен/);
+console.log("PASS: 10 receipts post exactly once; assistant opt-in, data limits, stockout and fallback");
 console.log("PASS queue batch: 50 valid invoices × 50 rows, one invalid retained; search, lazy details, register pagination ("+batchTime+" ms in JS harness)");
 
 t.run('S.venue.stockName="Напитки";S.data.stock={};S.data.counts=[];S.draft=null;delete S.sec.stock.docs.rest;A.tab({t:"stock"});A.close()');

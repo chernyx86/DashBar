@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from edi import EdiError, parse_edi
 from ocr import IMAGE_FORMATS, RecognitionError, recognize
@@ -31,6 +31,13 @@ DRIVE = "https://www.googleapis.com/drive/v3"
 SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
 IIKO = "https://api-ru.iiko.services"
 TELEGRAM = "https://api.telegram.org"
+OPENAI_RESPONSES = "https://api.openai.com/v1/responses"
+AI_INSTRUCTIONS = (
+    "Ты помощник барменеджера DashBar. Ответь на вопрос по-русски простым текстом без Markdown. "
+    "Предлагай конкретные проверяемые действия. Счётчики показывают наличие данных, "
+    "по ним нельзя восстановить цены, остатки, суммы или названия. Не выдумывай цифры. "
+    "При недостатке данных объясни, какие отчёты открыть. У тебя нет доступа к учётной системе."
+)
 DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{8,200}$")
 
 
@@ -68,6 +75,10 @@ class Store:
         db = sqlite3.connect(self.path)
         db.row_factory = sqlite3.Row
         return db
+
+    def record_audit(self, action, target):
+        with closing(self.connect()) as db, db:
+            db.execute("INSERT INTO audit(action,target) VALUES (?,?)", (action, target))
 
     def setting(self, key, default=None):
         with closing(self.connect()) as db:
@@ -400,6 +411,8 @@ async def lifespan(app):
         raise RuntimeError("BM_PUSH_TOKEN должен быть отдельным ключом минимум из 24 символов.")
     app.state.operator = token
     app.state.push = os.getenv("BM_PUSH_TOKEN", "")
+    app.state.ai_key = os.getenv("BM_AI_OPENAI_KEY", "").strip()
+    app.state.ai_model = os.getenv("BM_AI_OPENAI_MODEL", "").strip()
     app.state.store = Store(os.getenv("BM_DB", "data/intake.sqlite3"), Fernet(os.environ["BM_ENCRYPTION_KEY"]))
     app.state.status, app.state.lock = {}, asyncio.Lock()
     app.state.ocr_lock = asyncio.Lock()
@@ -440,6 +453,58 @@ app.mount("/assets", StaticFiles(directory=HTML.parent / "assets"), name="assets
 app.mount("/modules", StaticFiles(directory=HTML.parent / "modules"), name="modules")
 
 
+class AssistantContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invoices: int = Field(ge=0, le=1_000_000)
+    price_items: int = Field(ge=0, le=1_000_000)
+    stock_items: int = Field(ge=0, le=1_000_000)
+    counts: int = Field(ge=0, le=1_000_000)
+    sales_rows: int = Field(ge=0, le=1_000_000)
+
+
+class AssistantQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=700)
+    context: AssistantContext
+
+
+@app.post("/api/intake/assistant", dependencies=[Depends(operator)])
+async def ask_assistant(request: Request, values: AssistantQuestion):
+    state = request.app.state
+    if not (state.ai_key and state.ai_model):
+        raise HTTPException(503, "Внешний ИИ не настроен.")
+    question = values.question.strip()
+    if not question:
+        raise HTTPException(422, "Введите вопрос.")
+    payload = {
+        "model": state.ai_model, "instructions": AI_INSTRUCTIONS,
+        "input": json.dumps({"question": question, "context": values.context.model_dump()},
+                            ensure_ascii=False),
+        "store": False, "max_output_tokens": 350,
+    }
+    state.store.record_audit("assistant_requested", "openai")
+    try:
+        response = await state.client.post(
+            OPENAI_RESPONSES, headers={"Authorization": "Bearer " + state.ai_key},
+            json=payload, timeout=15.0, follow_redirects=False,
+        )
+        response.raise_for_status()
+        data = response.json()
+        chunks = [
+            part["text"] for item in data["output"] if item.get("type") == "message"
+            for part in item["content"]
+            if part.get("type") == "output_text" and isinstance(part.get("text"), str)
+        ]
+        answer = "\n".join(chunks).strip()
+        if data.get("status") != "completed" or not answer:
+            raise ValueError("Incomplete assistant response")
+    except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as error:
+        raise HTTPException(502, "Внешний ИИ временно недоступен.") from error
+    return {"answer": answer[:2500]}
+
+
 @app.get("/api/intake", dependencies=[Depends(operator)])
 def queue(request: Request, after_id: int = Query(default=0, ge=0, le=2**63-1)):
     store = request.app.state.store
@@ -449,7 +514,8 @@ def queue(request: Request, after_id: int = Query(default=0, ge=0, le=2**63-1)):
     return {"documents": documents, "next_cursor": next_cursor, "status": request.app.state.status,
             "drive": ({k: drive[k] for k in ("since", "recursive")} if drive else None),
             "telegram": ({"chat": telegram["chat"]} if telegram else None),
-            "iiko": bool(store.setting("iiko"))}
+            "iiko": bool(store.setting("iiko")),
+            "assistant_available": bool(request.app.state.ai_key and request.app.state.ai_model)}
 
 
 @app.put("/api/intake/drive", dependencies=[Depends(operator)])

@@ -27,9 +27,17 @@ function localAnswer(text){
     else L.push("Отклонений цен не видно: либо всё в пределах 5%, либо не хватает накладных или матрицы цен.");
     if(!isDemo()&&!Object.keys(S.data.prices).length)L.push("Матрица цен пуста — загрузите её в «Приёмке».");
   } else if(/заказ|заканч|остат|хватит/.test(t)){
-    const low=[];stockEntries().forEach(([p,item])=>{const u=dailyUse(p),q=num(item.qty);if(u>0&&q/u<=S.set.lowDays)low.push([p,q,Math.round(q/u)]);});
-    if(low.length)L.push("Заканчивается:\n"+low.slice(0,6).map(x=>`• ${x[0]}: остаток ${fmt(x[1])}, хватит на ${x[2]} дн.`).join("\n"));
-    else L.push("По остаткам и продажам критичных позиций нет.");
+    const stock=stockEntries(), low=[];
+    for(const [pos,item] of stock){
+      const qty=num(item.qty), use=dailyUse(pos);
+      if(qty<=0||use>0&&qty/use<=S.set.lowDays)low.push({pos,qty,days:qty<=0?0:qty/use});
+    }
+    low.sort((a,b)=>a.days-b.days);
+    if(low.length)L.push("Заканчивается:\n"+low.slice(0,6).map(({pos,qty,days})=>
+      `• ${pos}: остаток ${fmt(qty)}, ${qty<=0?"проверьте наличие":`хватит на ${fmt(days,1)} дн.`}`).join("\n"));
+    if(!stock.length)L.push("Остатков пока нет. Загрузите отчёт об остатках в разделе «Склад».");
+    else if(!S.data.sales.length)L.push("Для расчёта запаса в днях загрузите продажи за месяц.");
+    else if(!low.length)L.push("По позициям с известным расходом запас выше заданного порога.");
   } else if(/техкарт|ттк|себестоим|калькуляц/.test(t)){
     const c=f.filter(x=>x.sec==="cards");
     L.push(c.length?"По техкартам открыто:\n"+c.slice(0,4).map(x=>"• "+x.title).join("\n"):"По техкартам открытых находок нет. Загрузите рабочие ТТК в «Техкартах».");
@@ -44,25 +52,38 @@ function localAnswer(text){
   L.push("Это локальный ответ по вашим данным, без внешнего ИИ.");
   return L.join("\n\n");
 }
-async function sendChat(text){
+function assistantAvailable(){
+  return !isDemo()&&incoming.connected&&incoming.assistantAvailable;
+}
+function assistantContext(){
+  return {
+    invoices:S.data.invoices.length,
+    price_items:Object.keys(S.data.prices).length,
+    stock_items:stockEntries().length,
+    counts:S.data.counts.length,
+    sales_rows:S.data.sales.length
+  };
+}
+async function sendChat(text, external=false){
+  if(chatBusy)return;
+  const state=S;
+  const local=localAnswer(text);
   S.chat.push({role:"user",content:text});
   const last={role:"assistant",content:"…"};
   S.chat.push(last);chatBusy=true;render();
-  if(sampleFn){
-    const hist=S.chat.slice(0,-1).slice(-12);
-    const sys=`Ты ИИ-ассистент приложения DashBar: помощник барменеджера. Отвечай по-русски, коротко и по делу, профессиональными терминами HoReCa. Приложение не правит данные само. Не выдумывай цифры; если данных не хватает, скажи, какой отчёт загрузить. Без Markdown.
-Данные приложения:\n${ctx()}\n\nВопрос: `;
-    const input=hist.map((m,i)=>({role:m.role,content:i===0?sys+m.content:m.content}));
-    if(input[0].role!=="user")input.unshift({role:"user",content:sys+"(продолжение)"});
-    try{
-      const out=await sampleFn(input,{cache:false,onText:({text:tx})=>{last.content=tx;const el=document.querySelector("#chat .msg:last-child");if(el){el.textContent=tx;const m=document.getElementById("main");m.scrollTop=m.scrollHeight;}}});
-      last.content=out.text||last.content;
-    }catch(e){
-      last.content=localAnswer(text)+"\n\n(ИИ недоступен, ответ собран локально.)";
+  try{
+    if(external&&assistantAvailable()){
+      const result=await incomingRequest("/assistant",{method:"POST",
+        body:{question:text,context:assistantContext()}});
+      if(typeof result?.answer!=="string"||!result.answer.trim())throw new Error();
+      last.content="Ответ внешнего ИИ:\n"+result.answer+"\n\nПроверка по данным DashBar:\n"+local;
+    }else{
+      last.content=local;
     }
-  } else {
-    await new Promise(r=>setTimeout(r,180));
-    last.content=localAnswer(text);
+  }catch{
+    last.content=local+"\n\nВнешний ИИ недоступен.";
+  }finally{
+    chatBusy=false;
+    if(S===state||S.tab==="ai")render();
   }
-  chatBusy=false;render();
 }

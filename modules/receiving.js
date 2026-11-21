@@ -99,7 +99,7 @@ function vReceiving(){
   ${matrixBlock()}
   ${secFindings("receiving")}`;
 }
-const incoming={token:"",queue:[],nextCursor:null,notice:"",connected:false,busy:false};
+const incoming={token:"",queue:[],nextCursor:null,notice:"",connected:false,assistantAvailable:false,busy:false};
 const scanImage=/\.(?:jpe?g|png|webp)$/i;
 const incomingLabels={drive:"Google Drive",sheets:"Google Таблицы",telegram:"Telegram",external:"Входящий API",edi:"ЭДО",docsinbox:"DocsInBox"};
 const intakeKind=`<select class="in" name="kind" aria-label="Тип документа"><option value="invoice">Накладная</option><option value="matrix">Матрица цен</option></select>`;
@@ -266,6 +266,7 @@ async function refreshIncoming(append=false){
   incoming.queue=append?incoming.queue.concat(data.documents):data.documents;
   incoming.nextCursor=data.next_cursor??null;
   incoming.connected=true;
+  incoming.assistantAvailable=data.assistant_available===true;
   return data;
 }
 async function directIntake(link){
