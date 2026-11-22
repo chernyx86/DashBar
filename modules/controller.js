@@ -3,11 +3,14 @@ const VIEW={today:vToday,receiving:vReceiving,stock:vStock,cards:vCards,reports:
 function shell(){
   const tb=tabs(), t=S.tab, ini=(S.user.name.trim()[0]||"Б").toUpperCase();
   return `${isDemo()?`<div class="banner">Пример · вымышленный бар · цифры условные <button class="link" data-a="home" style="padding:0 0 0 8px;font-size:12px;text-decoration:underline">Выйти</button></div>`:""}
-  <div class="head"><div class="head-row"><div class="row brand-row"><span class="seal" aria-hidden="true">D</span><span class="eyebrow">${esc(venueName())}</span></div><div class="row"><button class="icon-btn" data-a="theme" aria-label="Переключить тему">${effTheme()==="dark"?"Светлая":"Тёмная"}</button><button class="avatar" data-a="settings" aria-label="Профиль и настройки">${esc(ini)}</button></div></div>
-   <div class="row"><h1>${TITLE[t]}</h1>${q(t==="today"||t==="ai"||t==="reports"?"stats":t)}</div>${t==="today"?`<span class="sub">${todayLabel()}</span>`:!isDemo()&&SEC[t]&&!secOn(t)?`<span class="sub">Раздел ещё не включён</span>`:""}</div>
-  <div class="main" id="main">${VIEW[t]()}</div>
-  ${t==="ai"?`<form class="composer${assistantAvailable()?" composer-external":""}" data-f="chat"><input class="in" id="chat-in" maxlength="700" placeholder="Спросите про бар" autocomplete="off" aria-label="Сообщение" value="${esc(draft)}"><button class="btn p" ${chatBusy?"disabled":""}>${chatBusy?"…":"Спросить"}</button>${assistantAvailable()?`<button class="btn" name="external" ${chatBusy?"disabled":""}>Спросить ИИ</button>`:""}</form>`:""}
-  <nav class="nav" style="grid-template-columns:repeat(${tb.length},1fr)" aria-label="Разделы">${tb.map(x=>`<button data-a="tab" data-t="${x[0]}" ${t===x[0]?'aria-current="page"':""}><svg viewBox="0 0 24 24" aria-hidden="true">${ICON[x[0]]}</svg>${x[1]}${!isDemo()&&SEC[x[0]]&&!secOn(x[0])?'<span class="lock" title="Не включён"></span>':""}</button>`).join("")}</nav>`;
+  ${!isDemo()&&storageRestricted?`<div class="banner" role="status">Браузер запретил сохранение. ${intakeOnServer()?"Разрешите хранение данных для этого адреса, чтобы сохранять документы и снимать их с очереди.":"Данные остаются в этой вкладке. Скачайте JSON-копию в профиле перед закрытием."}</div>`:""}
+  <header class="head">
+    <div class="row brand-row"><span class="seal" aria-hidden="true">D</span><div><span class="brand-name">DashBar</span><span class="eyebrow">${esc(venueName())}</span></div></div>
+    <button class="avatar" data-a="settings" aria-label="Профиль и настройки" title="Профиль и настройки">${esc(ini)}</button>
+  </header>
+  <nav class="nav" style="--sections:${tb.length}" aria-label="Разделы">${tb.map(x=>`<button data-a="tab" data-t="${x[0]}" ${t===x[0]?'aria-current="page"':""}><svg viewBox="0 0 24 24" aria-hidden="true">${ICON[x[0]]}</svg>${x[1]}</button>`).join("")}</nav>
+  <main class="main page" id="main"><div class="page-heading"><h1>${TITLE[t]}</h1>${t==="today"?`<time class="sub" datetime="${todayISO()}">${todayLabel()}</time>`:""}</div>${VIEW[t]()}</main>
+  ${t==="ai"?`<form class="composer" data-f="chat"><div class="row"><input class="in" id="chat-in" spellcheck="true" maxlength="700" placeholder="Спросите про бар" autocomplete="off" aria-label="Сообщение" value="${esc(draft)}"><button class="btn p" ${chatBusy?"disabled":""}>${chatBusy?"Отвечаю…":"Спросить"}</button></div>${assistantAvailable()?`<label class="row chat-option"><input type="checkbox" name="external"> Использовать внешний ИИ для этого вопроса</label><p class="muted">В OpenAI уйдут текст вопроса и количество записей.</p>`:""}</form>`:""}`;
 }
 /* ================= Нижние листы ================= */
 function sheetHtml(){
@@ -24,9 +27,14 @@ function sheetHtml(){
     const def=findReport(s.k), h=HELP[s.k]||["Отчёт","Описание появится позже."];
     let body="";
     if(isDemo()) body=table(def[3],def[4])+`<p class="muted">Цифры условные. Свои появятся, когда загрузите документы.</p>`;
+    else if(PREVIEW_REPORTS.has(s.k))body='<p class="muted">Расчёт для своего бара в разработке.</p>';
     else{
       const c=computeReport(s.k);
-      body=c?table(c.cols,c.rows)+(c.note?`<p class="muted">${esc(c.note)}</p>`:""):`<div class="res">Пока нет данных. ${esc(NEED[s.k]||"Загрузите документы.")}</div><button class="btn s" data-a="tab" data-t="${secForReport(s.k)}" style="align-self:flex-start">Перейти к загрузке</button>`;
+      const issues=c?.issues?.length?`<details><summary>Проверить продажи · ${c.issues.length}</summary>
+        ${table(["Продажа","Что проверить"],c.issues)}</details>`:"";
+      const sources=c?.recipeSources?.length?`<details><summary>Использованные ТТК · ${c.recipeSources.length}</summary>
+        ${table(["Продажа","Порций","Источник ТТК"],c.recipeSources)}</details>`:"";
+      body=c?table(c.cols,c.rows)+(c.note?`<p class="muted">${esc(c.note)}</p>`:"")+issues+sources:`<div class="res">Пока нет данных. ${esc(NEED[s.k]||"Загрузите документы.")}</div><button class="btn s" data-a="tab" data-t="${secForReport(s.k)}" style="align-self:flex-start">Перейти к загрузке</button>`;
     }
     b=`<div class="between"><h2>${def[1]}</h2><span class="badge">${isDemo()?"Пример":"по вашим данным"}</span></div><p>${h[1]}</p>${body}${close}`;
   }
@@ -61,13 +69,14 @@ function sheetHtml(){
   }
   if(s.t==="inv"){
     const d=S.draft||(S.draft={date:todayISO(),q:"",rows:{}});
-    const all=invList(), qq=(d.q||"").toLowerCase();
+    const stock=effectiveStock(), all=invList(stock), qq=(d.q||"").toLowerCase();
     const list=all.filter(p=>p.toLowerCase().includes(qq)).slice(0,80);
     const filled=Object.values(d.rows).filter(v=>String(v).trim()!=="").length;
     b=`<div class="between"><h2>Инвентаризация</h2><span class="badge" id="inv-count">${filled} из ${all.length}</span></div>
-      <label class="field">Дата<input class="in" id="inv-date" type="date" value="${esc(d.date)}" data-invd="1" ${d.reference?"disabled":""}></label>
+      <label class="field">Дата<input class="in" id="inv-date" type="date" max="${todayISO()}" value="${esc(d.date)}" data-invd="1" ${d.reference?"disabled":""}></label>
+      ${d.formDate?`<p class="muted">Бланк от ${ruDate(d.formDate)} · ${esc(d.warehouse)}</p>`:""}
       <input class="in search" id="inv-q" data-invq="1" placeholder="Поиск позиции" value="${esc(d.q||"")}" aria-label="Поиск">
-      <div class="list" style="max-height:44vh;overflow-y:auto">${list.length?list.map(p=>`<div class="invrow"><div class="nm">${esc(p)}<small>учёт ${fmt(bookOf(p))}</small></div><input data-inv="${esc(p)}" inputmode="decimal" value="${esc(d.rows[p]??"")}" placeholder="факт" aria-label="${esc(p)}"></div>`).join(""):`<div class="empty">Позиций нет. Загрузите остатки или матрицу цен.</div>`}</div>
+      <div class="list" style="max-height:44vh;overflow-y:auto">${list.length?list.map(p=>`<div class="invrow"><div class="nm">${esc(p)}<small>учёт ${fmt(bookOf(p,stock))}</small></div><input data-inv="${esc(p)}" inputmode="decimal" value="${esc(d.rows[p]??"")}" placeholder="факт" aria-label="${esc(p)}"></div>`).join(""):`<div class="empty">Позиций нет. Загрузите остатки или матрицу цен.</div>`}</div>
       <div class="btns">${d.reference?"":'<button class="btn" data-a="invfill">Заполнить учётом</button>'}<button class="btn p" data-a="invsave">Сохранить</button></div>
       ${S.sec.stock.q.how?`<p class="muted">${esc({"На весах":"Снимите массу тары и переведите результат в единицу учёта.","На глаз, десятыми":"Введите оценку в единицах учёта, например 0,4 л.","По-разному":"Сверьте единицу учёта каждой открытой бутылки перед вводом."}[S.sec.stock.q.how]||"")}</p>`:""}
       <p class="muted">Ввод идёт в черновик: можно закрыть и вернуться. Учёт берётся из загруженных остатков.</p>${close}`;
@@ -76,7 +85,7 @@ function sheetHtml(){
     const th=S.theme||"auto";
     b=`<h2>Профиль и настройки</h2><button class="btn s" data-a="survey">Ответы о баре</button>
      <label class="field">Название склада бара в учёте<input class="in" data-b="venue.stockName" value="${esc(S.venue.stockName)}" placeholder="Необязательно"></label>
-     <div class="field">Тема<div class="pills">${[["auto","Как в системе"],["light","Светлая «Хвоя и медь»"],["dark","Тёмная «Чернила и латунь»"]].map(x=>`<button class="pill" data-a="settheme" data-v="${x[0]}" aria-pressed="${th===x[0]}">${x[1]}</button>`).join("")}</div></div>
+     <div class="field">Тема<div class="pills">${[["auto","Как в системе"],["light","Светлая"],["dark","Тёмная"]].map(x=>`<button class="pill" data-a="settheme" data-v="${x[0]}" aria-pressed="${th===x[0]}">${x[1]}</button>`).join("")}</div></div>
      <label class="field">Время утренней сводки<input class="in" id="s-sum" type="time" data-b="set.summary" value="${esc(S.set.summary)}"></label>
      <div class="field">День заказа${pills("set.orderDay",["Пн","Вт","Ср","Чт","Пт","Сб","Вс"],S.set.orderDay)}</div>
      <label class="field">Дата инвентаризации<input class="in" id="s-inv" type="date" data-b="set.invDate" value="${esc(S.set.invDate)}"></label>
@@ -151,7 +160,6 @@ const A={
    try{history.replaceState(null,"","#"+d.t);}catch(e){}
    render();
    if(d.anchor)document.getElementById(d.anchor)?.scrollIntoView?.({block:"start"});
-   if(!d.anchor&&!isDemo()&&d.t!=="receiving"&&SEC[d.t]&&SEC[d.t].qs.length&&!S.sec[d.t].asked&&!S.seen[d.t]){S.seen[d.t]=true;sheet={t:"ask",k:d.t};render();}
  },
  ask:d=>{sheet={t:"ask",k:d.k};render(true);},
  askdone:d=>{S.sec[d.k].asked=true;sheet=null;render(true);},
@@ -175,12 +183,17 @@ const A={
    return "Очередь обновлена.";
  }),
  importpreview:()=>commitWorkbookPreview(),
+ recipeunit:d=>confirmRecipeUnit(d.index,d.line),
  receivingsources:()=>{sheet={t:"receivingsources"};render(true);},
- refreshintake:()=>runIncoming(async()=>{await refreshIncoming();return "Очередь обновлена.";}),
  syncintake:()=>runIncoming(async()=>{
-   const result=await incomingRequest("/sync",{method:"POST"});
+   let result;
+   try{result=await incomingRequest("/sync",{method:"POST"});}
+   catch(error){
+     await refreshIncoming();
+     return `Очередь обновлена. ${error.message}`;
+   }
    await refreshIncoming();
-   return Object.entries(result).map(([source,status])=>(incomingLabels[source]||source)+": "+status).join(" · ")||"Сохраните источник перед синхронизацией.";
+   return Object.entries(result).map(([source,status])=>(incomingLabels[source]||source)+": "+status).join(" · ")||"Очередь обновлена.";
  }),
  sourcefile:d=>runIncoming(async()=>{
    const item=incoming.queue.find(row=>String(row.id)===d.id);
@@ -208,8 +221,12 @@ const A={
  ordadd:()=>{const el=document.getElementById("ord-new");const v=el.value.trim();if(v){S.order.push({pos:v,qty:1,unit:""});render(true);}},
  orddel:d=>{S.order.splice(Number(d.i),1);render(true);},
  ordsuggest:()=>{
-   const s=suggestOrder();
-   if(!s.length)return toast(S.data.sales.length?"Нет позиций с рассчитанным расходом ниже порога":"Для расчёта заказа загрузите продажи или добавьте позиции вручную");
+   const stock=effectiveStock(), usage=stockUsage(stock);
+   if(!usage.duration)return toast(usage.note);
+   if(usage.consumption.recipeSales&&usage.consumption.skipped.size)
+     return toast("Проверьте несопоставленные продажи в отчёте «Факт и норма».");
+   const s=suggestOrder(stock,usage);
+   if(!s.length)return toast("Нет позиций с рассчитанным расходом ниже порога");
    let add=0;
    s.forEach(x=>{if(!S.order.some(o=>o.pos===x.pos)){S.order.push(x);add++;}});
    render(true);toast(add?"Добавлено позиций: "+add:"Всё уже в заказе");
@@ -218,14 +235,15 @@ const A={
  ordshare:async()=>{
    const t=orderText();
    if(!t)return;
-   if(navigator.share){try{await navigator.share({title:"Заказ",text:t});return;}catch(e){}}
-   copyText(t);
+   if(typeof navigator==="undefined"||!navigator.share)return;
+   try{await navigator.share({title:"Заказ",text:t});}
+   catch(error){if(error.name!=="AbortError")toast("Не удалось поделиться заказом.");}
  },
  orddown:()=>{const text=orderText();if(text)download("order-"+todayISO()+".txt",text);},
  count:()=>{if(!S.draft)S.draft={date:todayISO(),q:"",rows:{}};sheet={t:"inv"};render(true);},
  invfill:()=>{
-   const all=invList();
-   all.forEach(p=>{S.draft.rows[p]=String(fmt(bookOf(p),3)).replace(/\s/g,"");});
+   const stock=effectiveStock();
+   invList(stock).forEach(p=>{S.draft.rows[p]=String(fmt(bookOf(p,stock),3)).replace(/\s/g,"");});
    sheet={t:"inv"};render(true);toast("Подставлен учёт");
  },
  invsave:()=>{
@@ -234,14 +252,17 @@ const A={
    if(!entries.length)return toast("Введите хотя бы один факт");
    const date=parseDate(d.date);
    if(!date)return toast("Укажите дату инвентаризации");
+   if(date>todayISO())return toast("Дата инвентаризации не может быть в будущем");
    const invalid=entries.find(p=>!Number.isFinite(readNumber(d.rows[p]))||readNumber(d.rows[p])<0);
    if(invalid)return toast(`«${invalid}»: введите количество от нуля`);
    const src="count."+date+"."+uid();
    const rows=[], find=[], prices=matrixByPosition();
+   const stock=effectiveStock();
    let short=0, over=0, unpriced=0;
    entries.forEach(p=>{
-     const book=bookOf(p), fact=readNumber(d.rows[p]), diff=fact-book;
-     const row={pos:p,book,fact,unit:d.reference?.[p]?.unit||S.data.stock[p]?.unit||S.data.prices[p]?.unit||""};
+     const book=bookOf(p,stock), fact=readNumber(d.rows[p]), diff=fact-book;
+     const row={pos:p,book,fact,unit:d.reference?.[p]?.unit||(Object.hasOwn(stock,p)?stock[p].unit:"")||S.data.prices[p]?.unit||""};
+     if(d.sources&&Object.hasOwn(d.sources,p))row.sources={...d.sources[p],factEdited:fact!==d.sources[p].fact.qty};
      const price=inventoryPrice(row,prices);
      row.diff=diff;
      row.sum=diff*price;
@@ -264,7 +285,9 @@ const A={
      res.findings.unshift({title:"Возможная пересортица",detail:`Недостачи ${money(short)}, излишки ${money(over)}: суммы почти равны. Сверьте недостачи и излишки по группам.`,solution:"Сверять группы (сиропы, пюре, крепкий алкоголь) суммой, а не по вкусам.",value:"пересортица",n:1});
    }
    try{commitOperationalData("stock",()=>{
-     S.data.counts=[{id:uid(),src,date,rows,...totals},...S.data.counts].sort((a,b)=>b.date.localeCompare(a.date));
+     S.data.counts=[{id:uid(),src,date,rows,...totals,
+       warehouse:d.warehouse||S.sec.stock.docs.rest?.res?.snapshot?.warehouse||S.venue.stockName.trim()||"Бар",
+       ...(d.reference?{bookVerified:true}:{}),...(d.sources?{formDate:d.formDate}:{})},...S.data.counts].sort((a,b)=>b.date.localeCompare(a.date));
      if(!d.reference&&!(S.sec.stock.docs.rest?.res?.snapshot?.date>date)&&!S.data.counts.some(c=>c.date>date)){
        S.data.stock={...S.data.stock};
        rows.forEach(r=>{Object.defineProperty(S.data.stock,r.pos,{enumerable:true,configurable:true,writable:true,
@@ -279,6 +302,7 @@ const A={
  },
  export:()=>{if(isDemo())return toast("Откройте свой бар, чтобы сохранить копию.");download("dashbar-"+todayISO()+".json",JSON.stringify(S,null,2),"application/json");toast("Копия скачана");},
  eventnew:()=>{sheet={t:"event",rep:"none",date:days()[S.day].iso};render(true);},
+ reportreminder:()=>{sheet={t:"event",title:"Выгрузить продажи и остатки из iiko",rep:"none",date:todayISO()};render(true);},
  evrep:d=>{sheet.title=document.getElementById("ev-title").value;sheet.date=document.getElementById("ev-date").value;sheet.rep=d.v;render(true);},
  evsave:()=>{
    const t=document.getElementById("ev-title").value.trim(), dt=document.getElementById("ev-date").value;
@@ -288,21 +312,23 @@ const A={
  },
  eventdel:d=>{S.cal=S.cal.filter(c=>c.id!==d.id);if(fst(d.id).status==="cal")delete S.st[d.id];render(true);},
  reset:()=>{if(!confirm("Сбросить все данные прототипа?"))return;if(ownState){A.home();return;}S=blank();sheet=null;try{localStorage.removeItem(KEY);localStorage.removeItem(OLD);}catch(e){}render();},
- sugg:d=>{sendChat(d.v);},
+ sugg:d=>{
+   const input=document.getElementById("chat-in");
+   if(input){draft=d.v;input.value=d.v;input.focus?.();}
+ },
  chatclear:()=>{S.chat=[];render();},
  shade:(d,el,ev)=>{if(ev.target===el){sheet=null;render(true);}}
 };
-function bookOf(p){
+function bookOf(p,stock=effectiveStock()){
   if(S.draft?.reference?.[p])return num(S.draft.reference[p].qty);
-  const stock=effectiveStock();
   if(Object.hasOwn(stock,p))return num(stock[p].qty);
   const c=S.data.counts[0]; if(c){const r=c.rows.find(x=>x.pos===p); if(r) return r.fact;}
   return 0;
 }
-function invList(){
+function invList(stock=effectiveStock()){
   if(S.draft?.reference)return Object.keys(S.draft.reference).sort((a,b)=>a.localeCompare(b,"ru"));
   const set=new Set();
-  for(const [p] of stockEntries())set.add(p);
+  for(const p of Object.keys(stock))set.add(p);
   (S.data.counts[0]?S.data.counts[0].rows:[]).forEach(r=>set.add(r.pos));
   S.data.sales.forEach(r=>set.add(r.pos));
   Object.keys(S.data.prices).forEach(p=>set.add(p));
@@ -354,6 +380,10 @@ app.addEventListener("change",ev=>{
   const t=ev.target;
   if(t.dataset.docsinboxConflicts!==undefined&&sheet?.t==="docsinboxRegistry"){sheet.conflicts=t.checked;sheet.limit=25;paintDocsInboxRows();return;}
   if(t.dataset.uploadSelect!==undefined&&sheet?.t==="workbook"){sheet.selected=Number(t.value);render(true);return;}
+  if(sheet?.t==="workbook"&&sheet.kind==="splitFacts"){
+    if(t.dataset.countDate!==undefined){sheet.date=t.value;render(true);return;}
+    if(t.dataset.countWarehouse!==undefined){sheet.warehouseConfirmed=t.checked;render(true);return;}
+  }
   if(t.type==="file"&&t.files&&t.files[0]){
     if(t.dataset.import){importBackup(t.files[0]);return;}
     handleFile(t.dataset.sec,t.dataset.doc,t.files[0]);
@@ -363,7 +393,7 @@ app.addEventListener("submit",ev=>{
   ev.preventDefault();
   if(ev.target.dataset.f==="confirmocr")return confirmOcr();
   if(["directintake","connectintake","configureintake","importqueue","queuedexports"].includes(ev.target.dataset.f))return submitIncoming(ev.target);
-  if(ev.target.dataset.f==="chat"){const el=document.getElementById("chat-in");const v=el.value.trim();if(v&&!chatBusy){draft="";sendChat(v,ev.submitter?.name==="external");}}
+  if(ev.target.dataset.f==="chat"){const el=document.getElementById("chat-in");const v=el.value.trim();if(v&&!chatBusy){draft="";sendChat(v,ev.target.elements?.external?.checked===true);}}
 });
 function importBackup(file){
   if(isDemo())return toast("Откройте свой бар, чтобы восстановить копию.");

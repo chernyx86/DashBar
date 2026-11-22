@@ -20,6 +20,7 @@ const REPORTS=[
  ["r_turn","Оборачиваемость запасов",["Категория","Дней"],[["Крепкий алкоголь","34"]]],
  ["r_purch","Закупки по поставщикам",["Поставщик","Сумма, ₽","Доля"],[["Алкоголь 1","412 000","58%"]]]
 ]]];
+const PREVIEW_REPORTS=new Set(["r_move","r_staff","r_menueng","r_bevcost","r_turn"]);
 function findReport(k){let r=null;REPORTS.forEach(g=>g[2].forEach(x=>{if(x[0]===k)r=x;}));return r;}
 const NEED={r_inv:"Нужна инвентаризация: «Склад» → «Инвентаризация и сличительная ведомость».",
  r_rest:"Нужны остатки и продажи: «Склад» → «Остатки», «Отчёты» → «Продажи».",
@@ -39,7 +40,8 @@ const NEED={r_inv:"Нужна инвентаризация: «Склад» → �
 function secForReport(k){return k==="r_reg"||k==="r_pricectl"||k==="r_pricedyn"?"receiving":k==="r_sales"||k==="r_abc"||k==="r_writeoff"||k==="r_purch"?"reports":k==="r_menueng"||k==="r_bevcost"||k==="r_variance"?"cards":"stock";}
 function computeReport(key){
   const P=S.data.prices;
-  const sales=S.data.sales, stock=effectiveStock(), inv=S.data.counts, invoices=S.data.invoices;
+  const sales=barSalesRows(), stock=effectiveStock(), inv=S.data.counts, invoices=S.data.invoices;
+  if(key==="r_variance")return inventoryNormReport(stock);
   if(key==="r_inv"){
     const c=inv[0]; if(!c) return null;
     const prices=matrixByPosition();
@@ -48,8 +50,13 @@ function computeReport(key){
     return {cols:["Позиция","Учёт","Факт","Разница"],rows,note:`Инвентаризация от ${ruDate(c.date)}. ${inventoryTotals(c)}.`};
   }
   if(key==="r_rest"){
-    const rows=Object.keys(stock).map(p=>{const u=dailyUse(p);return [p,fmt(stock[p].qty),u>0?fmt(num(stock[p].qty)/u,0):"—"];});
-    return rows.length?{cols:["Позиция","Остаток","Дней"],rows:rows.slice(0,40)}:null;
+    const usage=stockUsage(stock);
+    const rows=Object.entries(stock).map(([pos,item])=>{
+      const use=dailyUse(pos,item.unit,usage);
+      const qty=fmt(item.qty)+(item.unit?" "+item.unit:"");
+      return [pos,qty,use>0?fmt(num(item.qty)/use,0):"—"];
+    });
+    return rows.length?{cols:["Позиция","Остаток","Дней"],rows:rows.slice(0,40),note:usage.note}:null;
   }
   if(key==="r_reg"){
     return invoices.length?{cols:["Дата","Поставщик","Позиций","Сумма","Статус"],rows:invoices.slice().sort((a,b)=>b.date.localeCompare(a.date)).slice(0,40).map(i=>[i.date?ruDate(i.date):"—",i.supplier||"—",String(i.rows.length),exactMoney(i.sum),invoiceReceiptStatus(i)])}:null;
@@ -61,10 +68,32 @@ function computeReport(key){
       note:`Сверено ${checks.filter(c=>c.matrix).length} из ${checks.length} строк. Порог отклонения — 5%.`};
   }
   if(key==="r_pricedyn"){
-    const byPos={};
-    invoices.forEach(inv2=>inv2.rows.forEach(r=>{if(!r.price)return;const m=new Date(inv2.date+"T12:00:00").getMonth();(byPos[r.pos]=byPos[r.pos]||{})[m]=num(r.price);}));
-    const rows=Object.keys(byPos).map(p=>{const ms=Object.keys(byPos[p]).map(Number).sort((a,b)=>a-b);const first=byPos[p][ms[0]],last=byPos[p][ms[ms.length-1]];const d=first?(last-first)/first*100:0;return [p,money(first),money(last),(d>0?"+":"")+pct(d)];}).filter(r=>r[3]!=="0,0%");
-    return rows.length?{cols:["Позиция","Раньше","Сейчас","Изм."],rows:rows.slice(0,30)}:null;
+    const series=new Map();
+    for(const invoice of invoices){
+      if(!invoice.date||parseDate(invoice.date)!==invoice.date||!receiveKey(invoice.supplier))continue;
+      const month=invoice.date.slice(0,7);
+      for(const row of invoice.rows){
+        const unit=receiveUnit(row.unit), price=readNumber(row.price);
+        if(!receiveKey(row.pos)||!unit||!Number.isFinite(price)||price<=0)continue;
+        const key=JSON.stringify([receiveKey(row.pos),receiveKey(invoice.supplier),unit,invoice.taxBasis||""]);
+        if(!series.has(key))series.set(key,{pos:row.pos,supplier:invoice.supplier,unit:row.unit,months:new Map()});
+        const {months}=series.get(key);
+        if((months.get(month)?.date||"")<=invoice.date)months.set(month,{date:invoice.date,price});
+      }
+    }
+    const rows=[];
+    for(const {pos,supplier,unit,months} of series.values()){
+      if(months.size<2)continue;
+      const dates=[...months.keys()].sort();
+      const first=months.get(dates[0]), last=months.get(dates.at(-1));
+      const change=(last.price-first.price)/first.price*100;
+      if(first.price===last.price)continue;
+      rows.push([pos,supplier,unit,
+        `${first.date.split("-").reverse().join(".")} · ${exactMoney(first.price)}`,
+        `${last.date.split("-").reverse().join(".")} · ${exactMoney(last.price)}`,(change>0?"+":"")+pct(change)]);
+    }
+    return rows.length?{cols:["Позиция","Поставщик","Единица","Раньше","Позже","Изм."],rows:rows.slice(0,30),
+      note:"Сравниваются последние цены первого и последнего доступных месяцев для одной позиции, поставщика, единицы и базы НДС."}:null;
   }
   if(key==="r_writeoff"){
     const by={};S.data.writeoffs.forEach(w=>{by[w.reason]=(by[w.reason]||0)+num(w.sum);});
@@ -74,22 +103,26 @@ function computeReport(key){
   if(key==="r_sales"){
     if(!sales.length) return null;
     const by={};sales.forEach(s=>{const c=s.category||"без категории";by[c]=by[c]||{q:0,s:0};by[c].q+=num(s.qty);by[c].s+=num(s.sum);});
-    const total=Object.values(by).reduce((a,b)=>a+b.s,0)||1;
-    return {cols:["Категория","Выручка","Доля"],rows:Object.keys(by).sort((a,b)=>by[b].s-by[a].s).map(k=>[k,money(by[k].s),pct(by[k].s/total*100)]),note:`Всего ${money(total)} за загруженный период.`};
+    const total=Object.values(by).reduce((a,b)=>a+b.s,0);
+    return {cols:["Категория","Выручка","Доля"],rows:Object.keys(by).sort((a,b)=>by[b].s-by[a].s).map(k=>[k,money(by[k].s),total?pct(by[k].s/total*100):"—"]),note:`Всего ${money(total)} за загруженный период.`};
   }
   if(key==="r_abc"){
-    if(!sales.length) return null;
-    const by={};sales.forEach(s=>{by[s.pos]=(by[s.pos]||0)+num(s.sum);});
-    const arr=Object.keys(by).map(k=>[k,by[k]]).sort((a,b)=>b[1]-a[1]);
-    const total=arr.reduce((a,b)=>a+b[1],0)||1;
-    let cum=0,A=0,B=0,C=0;
-    arr.forEach(x=>{cum+=x[1]/total;if(cum<=0.8)A++;else if(cum<=0.95)B++;else C++;});
-    /* FIX: убран битый return */
-    return {cols:["Группа","Позиций","Доля выручки"],rows:[["A",String(A),"≈80%"],["B",String(B),"≈15%"],["C",String(C),"≈5%"]]};
-  }
-  if(key==="r_turn"){
-    const rows=Object.keys(stock).map(p=>{const u=dailyUse(p);return [p,u>0?fmt(num(stock[p].qty)/u,0):"—"];}).filter(r=>r[1]!=="—");
-    return rows.length?{cols:["Позиция","Дней на складе"],rows:rows.slice(0,30)}:null;
+    const byPosition=new Map();
+    for(const row of sales)byPosition.set(row.pos,(byPosition.get(row.pos)||0)+num(row.sum));
+    const revenues=[...byPosition.values()].filter(value=>value>0).sort((a,b)=>b-a);
+    const total=revenues.reduce((sum,value)=>sum+value,0);
+    if(!total)return null;
+    const groups=[{name:"A",count:0,revenue:0},{name:"B",count:0,revenue:0},{name:"C",count:0,revenue:0}];
+    let cumulative=0;
+    for(const value of revenues){
+      const group=groups[cumulative/total<0.8?0:cumulative/total<0.95?1:2];
+      group.count++;
+      group.revenue+=value;
+      cumulative+=value;
+    }
+    return {cols:["Группа","Позиций","Доля выручки"],
+      rows:groups.map(group=>[group.name,String(group.count),pct(group.revenue/total*100)]),
+      note:"По позициям с положительной выручкой за загруженный период."};
   }
   if(key==="r_purch"){
     if(!invoices.length) return null;
@@ -101,10 +134,16 @@ function computeReport(key){
 }
 function vReports(){
   const top=!isDemo()?setup("reports"):"";
-  return top+REPORTS.map(g=>`<div class="sec"><div class="col" style="gap:2px"><h2>${g[0]}</h2><span class="muted">${g[1]}</span></div>
+  const reminder=!isDemo()&&S.ans.system==="iiko"?
+    '<div class="sec"><button class="btn s" data-a="reportreminder">Напомнить о выгрузке из iiko</button></div>':"";
+  return top+reminder+REPORTS.map(g=>`<div class="sec"><div class="col" style="gap:2px"><h2>${g[0]}</h2><span class="muted">${g[1]}</span></div>
    <div class="list">${g[2].map(r=>{
-     const ok=isDemo()||!!computeReport(r[0]);
-     return `<div class="li" data-a="report" data-k="${r[0]}" role="button" tabindex="0" style="cursor:pointer"><div><b>${r[1]}</b><span class="muted">${ok?"данные есть":"нужно загрузить: "+r[2].join(", ")}</span></div>${q(r[0])}</div>`;
+     if(!isDemo()&&PREVIEW_REPORTS.has(r[0]))
+       return `<div class="li"><div><b>${r[1]}</b><span class="muted">В разработке</span></div></div>`;
+     const report=isDemo()?null:computeReport(r[0]);
+     const ok=isDemo()||!!(r[0]==="r_variance"?report?.rows.length:report);
+     const status=isDemo()?"":ok?"Данные есть":r[0]==="r_variance"?"Проверьте документы для сверки":"Нужны документы";
+     return `<button class="li report-row" data-a="report" data-k="${r[0]}"><span><b>${r[1]}</b>${status?`<small class="muted">${status}</small>`:""}</span><span class="row-arrow" aria-hidden="true">›</span></button>`;
    }).join("")}</div></div>`).join("");
 }
 /* ---------- ИИ ---------- */

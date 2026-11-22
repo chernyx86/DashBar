@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import date as calendar_date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +19,9 @@ SCAN_FORMATS = IMAGE_FORMATS | {".pdf"}
 MAX_PAGES = 4
 MAX_PIXELS = 30_000_000
 MAX_ROWS = 100
+BUNDLED_TESSDATA = Path(__file__).with_name("ocr-models")
+OCR_LANGUAGES = ("rus", "eng")
+OCR_TOTAL_LABEL = str.maketrans("bceorp", "всеогр")
 MONTHS = "января февраля марта апреля мая июня июля августа сентября октября ноября декабря".split()
 
 
@@ -64,10 +68,25 @@ def source_pages(folder, name, data):
     return pages
 
 
-def words_from_image(image, scratch, timeout=20):
+def tesseract_options():
+    options = []
+    if not os.environ.get("TESSDATA_PREFIX") and BUNDLED_TESSDATA.is_dir():
+        options = ["--tessdata-dir", str(BUNDLED_TESSDATA)]
+    try:
+        listing = command(["tesseract", "--list-langs", *options], timeout=8)
+    except RecognitionError as error:
+        raise RecognitionError("Не удалось проверить языки Tesseract. Проверьте установку и TESSDATA_PREFIX.") from error
+    installed = set(listing.decode("utf-8", "replace").splitlines())
+    missing = [lang for lang in OCR_LANGUAGES if lang not in installed]
+    if missing:
+        raise RecognitionError("В Tesseract отсутствуют языковые модели: "+", ".join(missing)+".")
+    return options
+
+
+def words_from_image(image, scratch, timeout, options):
     mono = ImageOps.autocontrast(ImageOps.grayscale(image))
     mono.save(scratch)
-    raw = command(["tesseract", str(scratch), "stdout", "-l", "rus+eng", "--psm", "11",
+    raw = command(["tesseract", str(scratch), "stdout", *options, "-l", "+".join(OCR_LANGUAGES), "--psm", "11",
                    "-c", "tessedit_create_tsv=1"], timeout=timeout)
     words = []
     for row in csv.DictReader(io.StringIO(raw.decode("utf-8", "replace")), delimiter="\t", quoting=csv.QUOTE_NONE):
@@ -93,7 +112,7 @@ def page_text(words):
     return "\n".join(" ".join(word for _, word in sorted(line)) for _, line in bucket_lines(words))
 
 
-def scan_page(image, scratch, deadline, preferred_angle=None):
+def scan_page(image, scratch, deadline, options, preferred_angle=None):
     image.thumbnail((2460, 2460), Image.Resampling.LANCZOS)
     rotations = (0, 90, 270, 180) if preferred_angle is None else (preferred_angle, *(x for x in (0, 90, 270, 180) if x != preferred_angle))
     best = (-1, image, [], "", 0)
@@ -102,7 +121,7 @@ def scan_page(image, scratch, deadline, preferred_angle=None):
         remaining = deadline - monotonic()
         if remaining < 1:
             raise RecognitionError("Распознавание не успело завершиться. Попробуйте загрузить документ по частям.")
-        words = words_from_image(candidate, scratch, timeout=min(22, remaining))
+        words = words_from_image(candidate, scratch, min(22, remaining), options)
         combined = page_text(words)
         normalized = combined.lower().replace("ё", "е")
         evidence = sum(bool(re.search(key, normalized)) for key in
@@ -151,7 +170,7 @@ def extract_rows(image, words):
     locate = lambda fraction: first + (fraction-.14)*scale
     # UPD columns: description, unit, quantity, unit price before tax, tax, gross amount.
     total_markers = [y for x,y,_,w in words if x < locate(.25) and y > header+width*.07
-                     and re.sub(r"\W","",w).lower() == "всего"]
+                     and re.sub(r"\W","",w).lower().translate(OCR_TOTAL_LABEL) in {"всего", "итого"}]
     end = min(total_markers, default=image.height*.82)
     unit_hits = sorted((y, re.sub(r"[^а-я.]", "", w.lower())) for x,y,_,w in words
                        if header+width*.042 < y < end and locate(.265) <= x <= locate(.323)
@@ -196,12 +215,19 @@ def invoice_fields(image, words):
         near = [(xx, yy, word) for xx, yy, _, word in words
                 if abs(yy-y)<=width*.012 and x+width*.05<xx<x+width*.29]
         line = " ".join(word for _,_,word in sorted(near)).lower()
-        match = re.search(r"\b(\d{1,2})\s+("+"|".join(MONTHS)+r")\s+(20\d{2})\b", line)
-        if match:
-            date = f"{int(match[3]):04d}-{MONTHS.index(match[2])+1:02d}-{int(match[1]):02d}"
-            number_match = re.search(r"\b\d{1,14}\b", line[:match.start()])
-            document_number = number_match[0] if number_match else ""
-            break
+        written = re.search(r"\b(\d{1,2})\s+("+"|".join(MONTHS)+r")\s+(20\d{2})\b", line)
+        numeric = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b", line)
+        match = written or numeric
+        if not match:
+            continue
+        month = MONTHS.index(written[2])+1 if written else int(numeric[2])
+        try:
+            date = calendar_date(int(match[3]), month, int(match[1])).isoformat()
+        except ValueError:
+            continue
+        number_match = re.search(r"\b\d{1,14}\b", line[:match.start()])
+        document_number = number_match[0] if number_match else ""
+        break
     seller_labels = [(x,y) for x,y,_,token in words if re.sub(r"\W","",token.lower())=="продавец" and x<width*.35]
     if seller_labels:
         x,y = seller_labels[0]
@@ -238,6 +264,7 @@ def complete_gross_amounts(rows, total):
 def recognize(name, data):
     if not shutil.which("tesseract"):
         raise RecognitionError("На сервере нужно установить Tesseract с русским языком.")
+    options = tesseract_options()
     with TemporaryDirectory(prefix="bar-ocr-") as dirname:
         folder = Path(dirname)
         deadline = monotonic()+70
@@ -245,7 +272,7 @@ def recognize(name, data):
         all_rows, all_text, previews = [], [], []
         fields, total, angle = {}, "", None
         for index, page in enumerate(pages,1):
-            image, words, combined, angle = scan_page(read_image(page),folder/"work.png",deadline,angle)
+            image, words, combined, angle = scan_page(read_image(page),folder/"work.png",deadline,options,angle)
             rows, page_total = extract_rows(image,words)
             if index==1:
                 fields = invoice_fields(image, words)

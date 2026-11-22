@@ -2,16 +2,16 @@
 /* ================= Экраны ================= */
 function surveyFields(){return `
    <div class="field"><div class="between"><span>Что отнимает больше всего времени или денег?</span>${q("partial")}</div>${pills("ans.problem",["Инвентаризация и расхождения","Накладные и цены","Техкарты и себестоимость","Заказы поставщикам"],S.ans.problem)}</div>
-   <div class="field"><div class="between"><span>Учётная система</span>${q("receiving")}</div>${pills("ans.system",["iiko","R-Keeper и StoreHouse","Quick Resto","Другая","Нет"],S.ans.system)}</div>
-   <div class="field"><div class="between"><span>Ваш доступ к ней</span>${q("receiving")}</div>${pills("ans.access",["Вхожу сам","Выгрузки через бухгалтера","Доступа нет"],S.ans.access)}</div>
-   <div class="field"><div class="between"><span>Через что идут накладные и алкоголь</span>${q("receiving")}</div>${pills("ans.flow",["DocsInBox","Другой сервис ЭДО","Бумажные накладные","Не знаю"],S.ans.flow,true)}<span class="muted">Можно выбрать несколько.</span></div>
+   <div class="field"><div class="between"><span>Учётная система</span></div>${pills("ans.system",["iiko","R-Keeper и StoreHouse","Quick Resto","Другая","Нет"],S.ans.system)}</div>
+   <div class="field"><div class="between"><span>Ваш доступ к ней</span></div>${pills("ans.access",["Вхожу сам","Выгрузки через бухгалтера","Доступа нет"],S.ans.access)}</div>
+   <div class="field"><div class="between"><span>Через что идут накладные и алкоголь</span></div>${pills("ans.flow",["DocsInBox","Другой сервис ЭДО","Бумажные накладные","Не знаю"],S.ans.flow,true)}<span class="muted">Можно выбрать несколько.</span></div>
 `; }
 function onboarding(){
   const st=S.step, n={who:1,venue:2,three:3}[st];
   const top=n?`<div class="head"><div class="bar">${[1,2,3].map(i=>`<span class="${i<=n?"on":""}"></span>`).join("")}</div><div class="between"><span class="muted">Шаг ${n} из 3</span><button class="link" data-a="back">Назад</button></div></div>`:"";
   if(st==="start") return `<div class="main hero">
    <div class="between"><span class="row"><span class="seal" aria-hidden="true">D</span><span class="logo">DashBar</span></span><button class="icon-btn" data-a="theme">${effTheme()==="dark"?"Светлая":"Тёмная"}</button></div>
-   <div class="rule"></div>
+
    <h1>Управление баром</h1>
    <p class="sub">Приложение следит за накладными, ценами, техкартами и инвентаризацией. Находит отклонение, объясняет причину и предлагает решение. Решаете вы.</p>
    <div class="list">
@@ -103,48 +103,38 @@ function workflowCard(){
   if(isDemo()||!S.ans.problem)return "";
   const step=workflowStep();
   return `<div class="sec focus-card"><h2>${esc(S.ans.problem)}</h2><p>${esc(step.note)}</p><div class="row">
-    <button class="btn p" data-a="tab" data-t="${step.tab}" data-anchor="${step.anchor}">${esc(step.label)}</button>
-    <button class="link" data-a="survey">Изменить ответы</button></div></div>`;
+    <button class="btn p" data-a="tab" data-t="${step.tab}" data-anchor="${step.anchor}">${esc(step.label)}</button></div></div>`;
 }
 function vToday(){
   const fs=findings();
   const focusTab=FOCUS[S.ans.problem]?.[0];
-  const tasks=isDemo()?fs.filter(f=>f.task&&open(f)):fs.filter(open)
-    .sort((a,b)=>Number(b.sec===focusTab)-Number(a.sec===focusTab)).slice(0,4);
+  const ordered=fs.slice().sort((a,b)=>Number(open(b))-Number(open(a))||
+    Number(b.sec===focusTab)-Number(a.sec===focusTab));
+  const visible=ordered.slice(0,4), remaining=ordered.slice(4);
   const ds=days();
-  const setupList=!isDemo()?(()=>{
-    const first={"Инвентаризация и расхождения":"stock","Накладные и цены":"receiving","Техкарты и себестоимость":"cards","Заказы поставщикам":"stock"}[S.ans.problem]||"stock";
-    const ord=[first,...["stock","receiving","cards","reports"].filter(k=>k!==first)];
-    const off=ord.filter(k=>!secOn(k)&&tabs().some(([tab])=>tab===k));
-    return off.length?`<div class="sec"><div class="between"><h2>${off.length===tabs().filter(([tab])=>SEC[tab]).length?"Что включить первым":"Осталось включить"}</h2>${q("partial")}</div>
-     <div class="list">${off.map(k=>`<div class="li"><div><b style="font-weight:600;font-size:15px">${SEC[k].title}</b><span class="muted">${SEC[k].line}</span></div><button class="btn s" data-a="tab" data-t="${k}">Начать</button></div>`).join("")}</div></div>`:"";
-  })():"";
-  const stats=isDemo()?`<div class="grid2">${DEMO.stats.map(s=>`<div class="tile"><div class="between"><span class="l">${s[1]}</span>${q("stats")}</div><span class="n">${s[2]}</span><span class="f">${s[3]}</span></div>`).join("")}</div>`
+  const stats=isDemo()?`<div class="grid2">${DEMO.stats.map(s=>`<div class="tile"><span class="l">${s[1]}</span><span class="n">${s[2]}</span><span class="f">${s[3]}</span></div>`).join("")}</div>`
    :(()=>{const st=liveStats();
-     if(!st) return `<div class="card"><p class="muted">Цифры появятся после загрузки продаж за месяц и матрицы цен.</p><button class="btn s" data-a="tab" data-t="reports" style="align-self:flex-start">Загрузить продажи</button></div>`;
-     return `<div class="grid2">${st.map(s=>`<div class="tile"><div class="between"><span class="l">${esc(s[1])}</span>${q("stats")}</div><span class="n">${esc(s[2])}</span><span class="f">${esc(s[3])}</span></div>`).join("")}</div>`;})();
-  const dev=fs.filter(f=>f.value);
+     if(!st) return `<div class="card"><p class="muted">Загрузите продажи и остатки, чтобы увидеть показатели бара.</p></div>`;
+     return `<div class="grid2">${st.map(s=>`<div class="tile"><span class="l">${esc(s[1])}</span><span class="n">${esc(s[2])}</span><span class="f">${esc(s[3])}</span></div>`).join("")}</div>`;})();
   const items=eventsOn(ds[S.day].iso);
   return `${workflowCard()}
-  <div class="sec"><div class="between"><div class="row"><h2>Задачи</h2>${q("tasks")}</div><span class="muted">${tasks.length?tasks.length+" на сегодня":""}</span></div>
-   ${tasks.length?tasks.map(f=>fcard(f)).join(""):`<div class="card"><p class="muted">${fs.length?"Открытых задач нет.":"Задачи появятся после первого разобранного документа."}</p></div>`}</div>
-  <div class="sec"><div class="between"><div class="row"><h2>Статистика бара</h2>${q("stats")}</div><span class="muted">${isDemo()?DEMO.period:"30 дней"}</span></div>${stats}</div>
-  <div class="sec"><div class="row"><h2>Отклонения</h2>${q("deviations")}</div>
-   ${dev.length?`<div class="list">${dev.map(f=>`<div class="li" data-a="decide" data-id="${f.id}" role="button" tabindex="0" style="cursor:pointer"><div><b>${esc(f.title)}</b><span class="muted">${esc(f.detail)}</span></div><span class="val ${f.n?"n":fst(f.id).status?"ok":""}">${fst(f.id).status==="done"?"решено":esc(f.value)}</span></div>`).join("")}</div>`:`<div class="card"><p class="muted">Пока сравнивать не с чем.</p></div>`}</div>
-  ${setupList}
+  <div class="sec"><div class="between"><div class="row"><h2>Статистика бара</h2>${q("stats")}</div>${isDemo()?`<span class="muted">${DEMO.period}</span>`:""}</div>${stats}</div>
+  <div class="sec"><div class="between"><div class="row"><h2>Отклонения</h2>${q("deviations")}</div>${fs.length?`<span class="muted">Открыто: ${fs.filter(open).length}</span>`:""}</div>
+    ${visible.length?`<div class="finding-grid">${visible.map(f=>fcard(f)).join("")}</div>`:`<div class="card"><p class="muted">Отклонения появятся после обработки документов.</p></div>`}
+    ${remaining.length?`<details class="card disclosure"><summary>Ещё отклонения · ${remaining.length}</summary><div class="finding-grid">${remaining.map(f=>fcard(f)).join("")}</div></details>`:""}
+  </div>
   <div class="sec"><div class="row"><h2>Календарь задач</h2>${q("calendar")}<span style="flex:1"></span><button class="btn s" data-a="eventnew">Событие</button></div>
    <div class="days">${ds.map(d=>`<button class="day" data-a="day" data-i="${d.i}" aria-pressed="${S.day===d.i}">${d.wd}<b>${d.n}</b>${eventsOn(d.iso).length?"<i></i>":""}</button>`).join("")}</div>
    <div class="list">${items.length?items.map(x=>`<div class="li"><div><b>${esc(x.title)}</b></div><div class="row"><span class="muted">${esc(x.kind)}</span>${x.own?`<button class="q" data-a="eventdel" data-id="${x.id}" aria-label="Удалить">×</button>`:""}</div></div>`).join(""):`<div class="li"><div><span class="muted">На ${esc(ds[S.day].label)} ничего не назначено. День заказа и дату инвентаризации можно задать в настройках.</span></div></div>`}</div></div>`;
 }
 function liveStats(){
-  const sales=S.data.sales, stock=S.data.stock, counts=S.data.counts;
+  const sales=barSalesRows(), counts=S.data.counts;
   if(!sales.length&&!counts.length&&!S.data.invoices.length)return null;
   const rev=sales.reduce((a,b)=>a+num(b.sum),0);
   const cnt=sales.reduce((a,b)=>a+num(b.qty),0);
   const openInv=S.data.invoices.filter(i=>!i.receiptAt&&i.status!=="проведена").length;
   const res=[];
   res.push(["revenue","Выручка бара",rev?money(rev):"—",rev?"по загруженным продажам":"нет продаж"]);
-  res.push(["cost","Beverage cost","—","себестоимость продаж ещё не рассчитана"]);
   res.push(["sold","Продано позиций",cnt?fmt(cnt,0):"—","по загруженным продажам"]);
   res.push(["compl","Ожидают прихода",String(openInv),"накладные в реестре"]);
   return res;

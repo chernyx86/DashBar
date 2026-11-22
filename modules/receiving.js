@@ -18,8 +18,7 @@ function setup(k){
   const c=SEC[k], st=S.sec[k], docs=docsFor(k);
   const note=sectionHelp(k);
   const help=note?`<p class="muted">${esc(note)}</p>`:"";
-  const ans=c.qs.length?`<div class="card"><div class="between"><h3>Вопросы раздела</h3><button class="btn s" data-a="ask" data-k="${k}">${st.asked||Object.values(st.q).some(Boolean)?"Изменить":"Ответить"}</button></div>
-    ${st.asked||Object.values(st.q).some(Boolean)?c.qs.map(x=>`<p class="muted">${esc(x[1])} <b style="color:var(--text2)">${esc(st.q[x[0]]||"не отвечено")}</b></p>`).join(""):`<p class="muted">${c.qs.length} вопроса. Можно отложить.</p>`}</div>`:"";
+  const answers=c.qs.length?`<button class="link" data-a="ask" data-k="${k}">Вопросы о разделе</button>`:"";
   const dl=docs.map(d=>{
     const r=st.docs[d[0]], b=busy[k+"."+d[0]];
     const receiving=k==="receiving";
@@ -27,16 +26,15 @@ function setup(k){
       ${b?`<p class="muted">Читаю «${esc(b)}»…</p>`:""}
       ${r?.err?`<p class="muted">${r.errName?esc(r.errName)+": ":""}${esc(r.err)}</p>`:""}
       ${r?.res?resBlock(r,true):""}</div>`:"";
-    return `<div class="doc" id="doc-${d[0]}"><div class="between" style="align-items:flex-start"><div><h3>${esc(d[1])}</h3><p class="muted">${esc(d[2])}</p></div>${r&&r.res?`<span class="tag">Загружено</span>`:""}</div>
-     <p class="muted"><b style="color:var(--text2)">Где взять:</b> ${esc(d[3])}</p>
+    return `<div class="doc" id="doc-${d[0]}"><div class="between" style="align-items:flex-start"><div><h3>${esc(d[1])}</h3><p class="muted">${esc(d[2])}</p></div></div>
+     <details><summary class="muted">Формат и источник</summary><p class="muted">${esc(d[3])}</p></details>
      ${b?`<div class="res">Читаю «${esc(b)}»…</div>`:""}
      ${r&&r.err?`<div class="res" style="color:var(--warn)">${r.errName?esc(r.errName)+": ":""}${esc(r.err)}</div>`:""}
      ${r&&r.res?resBlock(r,receiving):""}
      <label class="btn s file" style="align-self:flex-start"> ${receiving?"Загрузить матрицу":(r&&r.res?"Загрузить другой файл":"Загрузить файл")}<input type="file" data-sec="${k}" data-doc="${d[0]}" accept="${receiving?"": "image/*,"}.pdf,.xlsx,.xls,.csv,.txt,.tsv" aria-label="${esc(d[1])}" ${b?"disabled":""}></label></div>`;
   }).join("");
-  if(k==="receiving")return `<div class="sec"><h2>Загрузка документов</h2>${help}<div class="list">${dl}</div></div>${ans}`;
-  return `${ans}<div class="sec"><div class="between"><h2>Документы</h2>${q("local")}</div>${help}<div class="list">${dl}</div>
-   <p class="muted">Excel, CSV и текст разбираются на устройстве. Фото и сканы — через ИИ, если он подключён.</p></div>`;
+  return `<div class="sec"><div class="between"><h2>${k==="receiving"?"Документы приёмки":"Документы"}</h2>${answers}</div>
+    ${help}<div class="list">${dl}</div></div>`;
 }
 const invoiceSearch={query:"",limit:25};
 function invoicesByDate(){
@@ -86,9 +84,10 @@ function vReceiving(){
   const comparisons=invoiceChecks();
   const matched=comparisons.filter(c=>c.matrix).length;
   const priceRows=priceControl(comparisons);
-  return `<div class="sec" id="doc-invoice"><button class="btn" data-a="receivingsources" style="align-self:flex-start">Источники и загрузка по ссылке</button></div>
-  ${S.data.docsInboxRegistry.length?'<button class="btn s" data-a="docsinboxregistry" style="align-self:flex-start">Реестр DocsInBox</button>':""}
-  <div class="sec" id="invoice-register"><div class="row"><h2>Реестр накладных</h2>${q("r_reg")}</div>
+  return `<div class="sec" id="invoice-register">
+    <div class="between section-actions" id="doc-invoice"><h2>Реестр накладных</h2>
+      <button class="btn s p" data-a="receivingsources">Источники накладных</button></div>
+    ${S.data.docsInboxRegistry.length?'<button class="link" data-a="docsinboxregistry" style="align-self:flex-start">Реестр DocsInBox</button>':""}
     ${invoices.length?`<label class="field">Поиск накладных<input class="in search" id="invoice-search" type="search"
       placeholder="Поставщик, товар или номер" autocomplete="off" value="${esc(invoiceSearch.query)}"></label>`:""}
     <div class="col" id="invoice-results">${invoiceResults(invoices)}</div></div>
@@ -103,7 +102,8 @@ const incoming={token:"",queue:[],nextCursor:null,notice:"",connected:false,assi
 const scanImage=/\.(?:jpe?g|png|webp)$/i;
 const incomingLabels={drive:"Google Drive",sheets:"Google Таблицы",telegram:"Telegram",external:"Входящий API",edi:"ЭДО",docsinbox:"DocsInBox"};
 const intakeKind=`<select class="in" name="kind" aria-label="Тип документа"><option value="invoice">Накладная</option><option value="matrix">Матрица цен</option></select>`;
-const intakeOnServer=()=>["http:","https:"].includes(location.protocol);
+const intakeOnServer=()=>!document.documentElement.hasAttribute?.("data-standalone")&&
+  ["http:","https:"].includes(location.protocol);
 function blankOcrRow(){return {pos:"",unit:"",qty:"",netPrice:"",netSum:"",vat:"",gross:"",needsReview:false};}
 function renderOcr(s){
   const input=(label,key,value,index)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
@@ -201,8 +201,7 @@ function receivingSources(){
   ${intakeOnServer()?`<form class="col" data-f="connectintake">
     <label class="field">Ключ оператора сервера<input class="in" type="password" name="token" autocomplete="off" required></label>
     <button class="btn s">${incoming.connected?"Переподключить очередь":"Подключить очередь"}</button></form>
-  <div class="btns"><button class="btn s" data-a="refreshintake">Обновить очередь</button>
-    <button class="btn s" data-a="syncintake">Синхронизировать источники</button></div>
+  ${incoming.connected?'<div class="btns"><button class="btn s" data-a="syncintake">Обновить документы</button></div>':""}
   <details class="card"><summary>Папка Google Drive</summary>
     <p class="muted">PDF и фото из папки появятся в очереди. Откройте документ для распознавания.</p>
     <form class="col" data-f="configureintake" data-source="drive">

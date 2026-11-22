@@ -44,7 +44,7 @@ function parseLoose(text){
   if(!sep)sep=",";
   return lines.map(l=>String(l).split(sep).map(x=>x.trim())).filter(r=>r.length>1);
 }
-async function readFile(file, receiving){
+async function readFile(file, receiving, doc){
   const n=(file.name||"").toLowerCase(); let text="",rows=[],images=[],part=false,sheets=[];
   if((file.type||"").startsWith("image/")){
     if(receiving)throw new Error("Загрузите Excel, CSV, TSV или PDF с табличным текстом.");
@@ -56,8 +56,14 @@ async function readFile(file, receiving){
       catch(e){await loadScript(CDN.xlsx);}
     }
     const wb=XLSX.read(await file.arrayBuffer(),{type:"array",cellDates:true});
-    sheets=wb.SheetNames.map(name=>({name,rows:XLSX.utils.sheet_to_json(wb.Sheets[name],
-      {header:1,blankrows:false,raw:true,defval:""})})).filter(entry=>entry.rows.length>1);
+    sheets=wb.SheetNames.map(name=>{
+      const ws=wb.Sheets[name];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,blankrows:false,raw:true,defval:""});
+      if(!ws["!ref"]||!(doc==="ttk"&&recipeLayout(name)||doc==="inv"||doc==="rest"))return {name,rows};
+      const range=XLSX.utils.decode_range(ws["!ref"]);
+      range.s={r:0,c:0};
+      return {name,rows,sourceRows:XLSX.utils.sheet_to_json(ws,{header:1,range,blankrows:true,raw:true,defval:""})};
+    }).filter(entry=>entry.rows.length>1);
     rows=sheets[0]?.rows||[];
     text=rows.map(r=>r.join("\t")).join("\n");
   }
@@ -98,11 +104,11 @@ async function readFile(file, receiving){
 /* ---------- Локальный разбор ---------- */
 const H={
  pos:["позиция","наименование","товар","номенклатура","название","продукт","ингредиент","блюдо","карта"],
- book:["учет","по учету","книжн","систем","остаток по"],
- fact:["факт"],
+ book:["учет","по учету","учетный остаток","книжн","систем","остаток по"],
+ fact:["факт","по факту","фактический остаток","остаток фактический"],
  qty:["количество","кол во","колво","qty","остаток","приход","расход"],
  price:["цена","price","стоимость за"],
- sum:["сумма","итого","total","стоимость"],
+ sum:["сумма","итого","total","стоимость","выручка"],
  unit:["ед изм","единица","единица измерения","единицы","ед"],
  supplier:["поставщик","контрагент","vendor"],
  reason:["причина","основание"],
@@ -203,7 +209,7 @@ function barWarehouse(name){
   return S.venue.stockName.trim()?receiveKey(name)===receiveKey(S.venue.stockName):/^бар(?:[\s(–-]|$)/i.test(name);
 }
 const itemTotal=name=>/^(?:итого|всего)(?:$| по )/.test(receiveKey(name));
-function stockWorkbook(rows){
+function stockWorkbook(rows,sheetName){
   const opening=rows.slice(0,5).flat().map(normHeader);
   const osv=opening.includes("расширенная оборотно сальдовая ведомость");
   if(!osv&&!opening.includes("остатки на складах"))return [];
@@ -216,6 +222,7 @@ function stockWorkbook(rows){
   const units=["ед измерения","ед изм","единица измерения","единица"];
   const pos=inColumn(osv?rows[header+1]:columns,names);
   const unit=inColumn(columns,units);
+  const code=inColumn(osv?rows[header+1]:columns,["артикул","код","код товара"]);
   const date=osv?rows.slice(0,6).flat().map(cellText).join(" ").match(/(?:^|\s)по\s+(\d{2}\.\d{2}\.\d{4})/i)?.[1]:findDate(rows.slice(0,header));
   const balance=inColumn(columns,["остатки на конец","остаток на конец"]);
   const options=osv?[{warehouse:warehouseLabel(rows),index:balance}]:columns.map((cell,index)=>({warehouse:cellText(cell),index}))
@@ -223,10 +230,12 @@ function stockWorkbook(rows){
   if(!options.length||pos<0||options.some(entry=>!barWarehouse(entry.warehouse)))throw new Error("Выберите выгрузку с отдельным складом бара. Если в учёте он называется иначе, укажите точное название в настройках.");
   if(osv&&inColumn([rows[header+1][balance]],["кол во","количество"])!==0)throw new Error("В ведомости не найдена колонка количества на конец периода.");
   return options.map(({warehouse,index})=>{
-    const body=rows.slice(header+(osv?2:1)).flatMap(r=>{
+    const start=header+(osv?2:1);
+    const body=rows.slice(start).flatMap((r,rowOffset)=>{
       const name=cellText(r[pos]), raw=r[index], qty=readNumber(raw);
       if(!name||itemTotal(name)||!Number.isFinite(qty))return [];
-      return [{pos:name,qty,unit:cellText(r[unit])||name.match(/,\s*(шт|кг|л|г|мл|уп\.?|бут\.?)$/i)?.[1]||""}];
+      return [{pos:name,qty,unit:cellText(r[unit])||name.match(/,\s*(шт|кг|л|г|мл|уп\.?|бут\.?)$/i)?.[1]||"",
+        code:cellText(r[code]),sheet:sheetName,sourceLine:start+rowOffset+1}];
     });
     const duplicates=new Set();
     const keys=new Set();
@@ -237,6 +246,25 @@ function stockWorkbook(rows){
     }
     return {label:warehouse,warehouse,date:date?parseDate(date):"",type:osv?"Оборотно-сальдовая ведомость":"Остатки на складах",
       rows:body.filter(r=>!duplicates.has(receiveKey(r.pos))),excluded:body.filter(r=>duplicates.has(receiveKey(r.pos))).length};
+  });
+}
+function splitBarFact(sheets){
+  return sheets.flatMap(({name,sourceRows:rows})=>{
+    if(!rows||normHeader(name)!=="товары")return [];
+    const header=workbookTable(rows,(row,index)=>inColumn(row,["бар"])>=0&&inColumn(row,["всего"])>=0&&
+      inColumn(rows[index+1]||[],["наименование"])>=0);
+    if(header<0)return [];
+    const columns=rows[header], names=rows[header+1];
+    const pos=inColumn(names,["наименование"]), unit=inColumn(columns,["ед изм","ед измерения"]);
+    const fact=inColumn(columns,["бар"]), code=inColumn(names,["код","артикул"]);
+    if(unit<0)return [];
+    const rowsOut=rows.slice(header+2).flatMap((row,index)=>{
+      const name=cellText(row[pos]), qty=readNumber(row[fact]);
+      return !name||itemTotal(name)?[]:[{pos:name,code:cellText(row[code]),unit:cellText(row[unit]),
+        fact:Number.isFinite(qty)&&qty>=0?qty:null,sheet:name,sourceLine:header+index+3}];
+    });
+    const form=sheets.find(item=>normHeader(item.name)==="блюда заготовки");
+    return [{label:name,formDate:findDate(form?.rows.slice(0,8)||[]),rows:rowsOut}];
   });
 }
 function factWorkbook(sheets){
@@ -276,12 +304,18 @@ function priceWorkbook(sheets){
 }
 function workbookPreview(doc,book){
   if(!book.sheets.length)return null;
+  if(doc==="ttk"){
+    const items=book.sheets.map(parseRecipeSheet).filter(item=>item?.cards.length);
+    if(items.length)return {kind:"recipes",items};
+  }
   if(doc==="inv"){
+    const split=splitBarFact(book.sheets);
+    if(split.length)return {kind:"splitFacts",items:split,date:"",warehouseConfirmed:false};
     const items=factWorkbook(book.sheets);
     if(items.length)return {kind:"facts",items};
   }
   if(doc==="rest"){
-    const items=book.sheets.flatMap(({rows})=>stockWorkbook(rows));
+    const items=book.sheets.flatMap(({name,rows,sourceRows})=>stockWorkbook(sourceRows||rows,name));
     if(items.length)return {kind:"balances",items};
   }
   if(doc==="matrix"){
@@ -311,13 +345,28 @@ function priceCandidates(option){
 }
 function previewUpload(s){
   const option=s.items[s.selected||0];
+  if(s.kind==="recipes")return previewRecipeImport(s,option);
+  if(s.kind==="splitFacts"){
+    const stock=S.data.stockReference?.snapshot;
+    const ready=stock&&s.date===stock.date&&s.date<=todayISO()&&s.warehouseConfirmed&&barWarehouse(stock.warehouse);
+    const matched=ready?Object.keys(prepareFactDraft(s.items)).length:0;
+    const filled=option.rows.filter(row=>row.fact!==null).length;
+    return `<h2>Факт по колонке «Бар»</h2><p class="muted">${esc(s.file)} · лист «Товары»</p>
+      <p>Строк с фактом: ${filled}. Колонки «Склад» и «Всего» исключены.</p>
+      ${option.formDate?`<p>Дата бланка: ${ruDate(option.formDate)}.</p>`:""}
+      <label class="field">Дата пересчёта<input class="in" type="date" max="${todayISO()}" value="${esc(s.date)}" data-count-date></label>
+      ${stock?`<p>Учётные остатки: ${ruDate(stock.date)} · ${esc(stock.warehouse)}</p>
+        <label><input type="checkbox" data-count-warehouse ${s.warehouseConfirmed?"checked":""}> Колонка «Бар» относится к складу «${esc(stock.warehouse)}»</label>`:"<p>Загрузите учётные остатки бара на дату пересчёта.</p>"}
+      <p>${ready?`Совпало: ${matched}. Без сопоставления: ${filled-matched}.`:"Для сверки укажите дату пересчёта и подтвердите склад учётной выгрузки."}</p>
+      <button class="btn p" data-a="importpreview" ${matched?"":"disabled"}>Перенести совпадения в черновик</button>`;
+  }
   const label=s.kind==="facts"?"Фактические остатки":s.kind==="balances"?"Учётные остатки":"Закупочные цены";
   const select=s.kind==="facts"||s.items.length===1?"":`<label class="field">${s.kind==="contract"?"Лист книги":"Склад бара"}
     <select class="in" data-upload-select>${s.items.map((item,i)=>`<option value="${i}" ${i===(s.selected||0)?"selected":""}>${esc(item.label)}</option>`).join("")}</select></label>`;
   if(s.kind==="facts"){
     const count=s.items.reduce((n,item)=>n+item.rows.filter(r=>r.fact!==null).length,0);
     const stock=S.data.stockReference?.snapshot;
-    const comparable=s.items.every(item=>stock&&item.date&&stock.date===item.date&&
+    const comparable=s.items.every(item=>stock&&item.date&&stock.date===item.date&&item.date<=todayISO()&&
       barWarehouse(item.warehouse)&&receiveKey(stock.warehouse)===receiveKey(item.warehouse));
     const why=!s.items.every(i=>barWarehouse(i.warehouse))?"Склад в бланке не распознан как отдельный бар. Загрузите отдельную выгрузку или проверьте название склада в настройках.":
       !stock?"Загрузите учётные остатки бара на дату инвентаризации.":"Проверьте, совпадают ли дата и склад с учётными остатками.";
@@ -331,13 +380,14 @@ function previewUpload(s){
   if(s.kind==="balances"){
     const previous=S.sec.stock.docs.rest?.res?.snapshot;
     const older=previous?.date&&option.date&&previous.date>option.date;
+    const future=option.date>todayISO();
     const other=previous?.warehouse&&receiveKey(previous.warehouse)!==receiveKey(option.warehouse);
     return `<h2>${label}</h2><p class="muted">${esc(s.file)}</p>${select}
       <p>${esc(option.type)} · ${esc(option.warehouse)} · ${option.date?ruDate(option.date):"дата отсутствует"}</p>
       <p>Готово к загрузке: ${option.rows.length} строк.${option.excluded?" Исключено из-за повторов названия: "+option.excluded+".":""}</p>
       ${table(["Позиция","Остаток"],option.rows.slice(0,5).map(r=>[r.pos,fmt(r.qty,4)+" "+r.unit]))}
-      ${older?'<p>В приложении уже есть остатки на более позднюю дату.</p>':other?'<p>Загруженный склад отличается от текущего.</p>':''}
-      <button class="btn p" data-a="importpreview" ${older||other||!option.rows.length||!option.date?"disabled":""}>Сохранить остатки бара</button>`;
+      ${future?'<p>Дата остатков не может быть в будущем.</p>':older?'<p>В приложении уже есть остатки на более позднюю дату.</p>':other?'<p>Загруженный склад отличается от текущего.</p>':''}
+      <button class="btn p" data-a="importpreview" ${older||future||other||!option.rows.length||!option.date?"disabled":""}>Сохранить остатки бара</button>`;
   }
   const candidates=priceCandidates(option);
   return `<h2>${label}</h2><p class="muted">${esc(s.file)}</p>${select}
@@ -347,48 +397,66 @@ function previewUpload(s){
     ${table(["Позиция","Поставщик","Единица","Цена"],candidates.rows.slice(0,5).map(r=>[r.pos,r.supplier,r.unit,exactMoney(r.price)]))}
     <button class="btn p" data-a="importpreview" ${candidates.rows.length?"":"disabled"}>Подтвердить закупочные цены</button>`;
 }
-function prepareFactDraft(items){
-  const quantities=new Map(), stock=new Map();
+function prepareFactDraft(items,sources){
+  const quantities=new Map(), stock=new Map(), byCode=new Map();
   for(const [name,r] of Object.entries(S.data.stockReference?.stock||{})){
+    const entry={name,...r};
     const key=receiveKey(name);
-    stock.set(key,stock.has(key)?null:{name,unit:r.unit});
+    stock.set(key,stock.has(key)?null:entry);
+    if(r.code)byCode.set(r.code,byCode.has(r.code)?null:entry);
   }
   for(const {rows} of items){
     for(const r of rows){
       if(r.fact===null)continue;
-      const key=receiveKey(r.pos);
-      quantities.set(key,quantities.has(key)?null:r);
+      const named=stock.get(receiveKey(r.pos));
+      const entry=r.code&&byCode.has(r.code)?byCode.get(r.code):named;
+      if(!entry||(r.code&&entry.code&&r.code!==entry.code))continue;
+      quantities.set(entry.name,quantities.has(entry.name)?null:{entry,r});
     }
   }
-  return Object.fromEntries([...quantities].flatMap(([key,r])=>{
-    const entry=stock.get(key);
-    return entry&&r&&receiveUnit(r.unit)&&receiveUnit(r.unit)===receiveUnit(entry.unit)?[[entry.name,String(r.fact)]]:[];
+  return Object.fromEntries([...quantities].flatMap(([name,match])=>{
+    if(!match||!receiveUnit(match.r.unit)||receiveUnit(match.r.unit)!==receiveUnit(match.entry.unit))return [];
+    const {entry,r}=match;
+    if(sources)sources[name]={fact:{file:items[0].file,sheet:r.sheet,line:r.sourceLine,qty:r.fact},
+      book:{file:entry.file,sheet:entry.sheet,line:entry.sourceLine}};
+    return [[name,String(r.fact)]];
   }));
 }
 async function commitWorkbookPreview(){
   if(sheet?.t!=="workbook")return;
   const s=sheet, option=s.items[s.selected||0];
   try{
-    if(s.kind==="facts"){
+    if(s.kind==="recipes"){
+      storeRecipeSheet(s.file,option);
+      sheet=null;
+    }else if(s.kind==="facts"||s.kind==="splitFacts"){
       const snapshot=S.data.stockReference?.snapshot;
-      if(!snapshot||!s.items.every(i=>i.date===snapshot.date&&barWarehouse(i.warehouse)&&receiveKey(i.warehouse)===receiveKey(snapshot.warehouse)))
+      const split=s.kind==="splitFacts";
+      const compatible=snapshot&&snapshot.date<=todayISO()&&(split?s.warehouseConfirmed&&s.date===snapshot.date&&barWarehouse(snapshot.warehouse):
+        s.items.every(i=>i.date===snapshot.date&&barWarehouse(i.warehouse)&&receiveKey(i.warehouse)===receiveKey(snapshot.warehouse)));
+      if(!compatible)
         throw new Error("Для сверки нужны остатки того же склада и даты.");
-      const rows=prepareFactDraft(s.items);
+      const sources=split?Object.create(null):null;
+      const rows=prepareFactDraft(s.items.map(item=>({...item,file:s.file})),sources);
       if(S.draft&&Object.keys(S.draft.rows).length&&!confirm("Заменить текущий черновик?"))return;
       if(!Object.keys(rows).length)throw new Error("Нет строк с совпадающими названием и единицей.");
       const reference=Object.fromEntries(Object.keys(rows).map(p=>[p,S.data.stockReference.stock[p]]));
       const previous=S.draft;
-      S.draft={date:snapshot.date,q:"",rows,reference};
+      S.draft={date:snapshot.date,q:"",rows,reference,warehouse:snapshot.warehouse,
+        ...(split?{formDate:option.formDate,sources}:{})};
       if(!save()){S.draft=previous;throw new Error("Не удалось сохранить черновик.");}
       sheet={t:"inv"};
     }else if(s.kind==="balances"){
       const previous=S.sec.stock.docs.rest?.res?.snapshot;
+      if(option.date>todayISO())throw new Error("Дата остатков не может быть в будущем.");
       if(!option.rows.length||!option.date||!barWarehouse(option.warehouse)||previous?.date>option.date||
           (previous?.warehouse&&receiveKey(previous.warehouse)!==receiveKey(option.warehouse)))throw new Error("Проверьте дату и склад.");
       const stock=Object.fromEntries(option.rows.map(r=>[r.pos,{qty:r.qty,unit:r.unit}]));
+      const referenceStock=Object.fromEntries(option.rows.map(r=>[r.pos,{...stock[r.pos],
+        code:r.code,file:s.file,sheet:r.sheet,sourceLine:r.sourceLine}]));
       const rest=S.sec.stock.docs.rest, old=S.data.stock, reference=S.data.stockReference;
       S.data.stock=stock;
-      S.data.stockReference={snapshot:{date:option.date,warehouse:option.warehouse},stock:{...stock}};
+      S.data.stockReference={snapshot:{date:option.date,warehouse:option.warehouse},stock:referenceStock};
       S.sec.stock.docs.rest={name:s.file,local:true,res:{doc_type:option.type,summary:`Остатки: ${option.rows.length} позиций.`,
         period:ruDate(option.date),snapshot:{date:option.date,warehouse:option.warehouse}}};
       if(!save()){S.data.stock=old;S.data.stockReference=reference;S.sec.stock.docs.rest=rest;throw new Error("Не удалось сохранить остатки в браузере.");}
@@ -490,7 +558,9 @@ function applyDoc(sec,docKey,parsed){
   const res={doc_type:parsed.title,period:parsed.date?ruDate(parsed.date):"",fits:true,fits_comment:"",summary:"",findings:[],missing:[]};
   const F=[];
   if(parsed.type==="inventory"){
-    const rows=parsed.rows.filter(r=>!(/^(?:итого|всего)$/.test(receiveKey(r.pos))))
+    const date=parsed.date||todayISO();
+    if(date>todayISO())throw new Error("Дата инвентаризации не может быть в будущем.");
+    const rows=parsed.rows.filter(r=>r.fact!==""&&!itemTotal(r.pos))
       .map(r=>({pos:r.pos,unit:r.unit||S.data.stock[r.pos]?.unit||"",book:readNumber(r.book),fact:readNumber(r.fact),sourceLine:r.sourceLine}));
     const invalid=rows.find(r=>!r.pos||!Number.isFinite(r.book)||!Number.isFinite(r.fact)||r.fact<0);
     if(invalid)throw new Error(`Проверьте учёт и факт в строке «${invalid.pos||"без названия"}».`);
@@ -516,7 +586,6 @@ function applyDoc(sec,docKey,parsed){
     if(possibleResort(totals)){
       F.unshift({title:"Возможная пересортица",detail:`Недостачи ${money(short)}, излишки ${money(over)}: суммы почти равны. Возможная причина — списание с другой позиции. Проверьте по документам.`,solution:"Сверять группы суммой, а не по вкусам.",value:"пересортица",n:1});
     }
-    const date=parsed.date||todayISO();
     S.data.counts=S.data.counts.filter(c=>c.src!==src);
     S.data.counts.unshift({id:uid(),src,date,rows,...totals});
     S.data.counts.sort((a,b)=>b.date.localeCompare(a.date));
@@ -531,6 +600,7 @@ function applyDoc(sec,docKey,parsed){
       res.summary=`Остатки ЕГАИС: ${rows.length} позиций. Складские остатки хранятся отдельно.`;
       return res;
     }
+    if(parsed.date>todayISO())throw new Error("Дата остатков не может быть в будущем.");
     const previous=S.sec.stock.docs.rest?.res?.snapshot?.date;
     if(previous&&(!parsed.date||parsed.date<previous))
       throw new Error("Укажите дату, равную или более позднюю, чем сохранённый остаток.");
@@ -549,7 +619,12 @@ function applyDoc(sec,docKey,parsed){
     if(low.length)F.push({title:`Нулевой остаток: ${low.length} позиций`,detail:low.slice(0,5).map(r=>r.pos).join(", "),solution:"Проверить и добавить в заказ.",value:String(low.length)});
   }
   else if(parsed.type==="sales"){
-    const rows=parsed.rows.map(r=>({pos:r.pos,qty:num(r.qty),sum:num(r.sum)||num(r.qty)*num(r.price),category:r.category||"",unit:r.unit||"",qtyKnown:Number.isFinite(readNumber(r.qty)),src})).filter(r=>r.pos);
+    const rows=parsed.rows.filter(r=>r.pos&&!itemTotal(r.pos)).map(r=>{
+      const qty=readNumber(r.qty), sum=readNumber(r.sum);
+      return {pos:r.pos,qty:num(qty),sum:Number.isFinite(sum)?sum:num(qty)*num(r.price),
+        category:r.category||"",unit:r.unit||"",qtyKnown:Number.isFinite(qty),src};
+    });
+    if(!rows.length)throw new Error("В файле нет строк продаж.");
     S.data.sales=S.data.sales.filter(r=>r.src!==src).concat(rows);
     const total=rows.reduce((a,r)=>a+(r.sum||0),0);
     res.usagePeriod=salesPeriod(parsed.metadata);
@@ -586,7 +661,7 @@ async function handleFile(sec,doc,file){
   busy[key]=file.name;render(true);
   try{
     const receiving=sec==="receiving";
-    const r=await readFile(file,receiving);
+    const r=await readFile(file,receiving,doc);
     if(S!==state||S.mode!==mode)return;
     const registry=receiving&&doc==="invoice"?parseDocsInboxRegistry(r):null;
     if(registry){sheet={t:"docsinboxPreview",rows:registry};return "docsinboxRegistry";}

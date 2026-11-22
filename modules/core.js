@@ -61,7 +61,7 @@ r_move:["Движение товара","Приход, расход и оста�
 r_staff:["Персонал и представительские","Что выдано без оплаты и на какую сумму."],
 r_menueng:["Меню-инжиниринг","Популярность и маржа по позициям: звёзды, лошадки, загадки, аутсайдеры."],
 r_bevcost:["Себестоимость продаж","Beverage cost по категориям: где выше цели и почему."],
-r_variance:["Факт и норма","Сколько должно было уйти по техкартам и сколько ушло по факту."]
+r_variance:["Факт и норма","Нормативный расход по продажам и сверка остатков на конец периода."]
 };
 
 /* ================= Данные примера ================= */
@@ -111,10 +111,10 @@ function docsFor(sec){
     ["invoice","Накладные","Excel, CSV, TSV или PDF с табличным текстом. Загрузите одну барную накладную за раз.","Таблица с колонками «Позиция», «Количество», «Цена». Для сверки добавьте «Единица» и «Поставщик». Если есть, добавьте «Дата», «Номер накладной» и «Сумма»."],
     ["matrix","Матрица цен","Чтобы сверять цену в каждой накладной с договорённой.","Таблица: позиция, единица, цена, поставщик."]],
    cards:[
-    ["ttk","Рабочие ТТК","Карты, по которым работают бармены.","Excel или CSV: блюдо, ингредиент, брутто, нетто, выход."],
+    ["ttk","Рабочие ТТК","Карты, по которым работают бармены.","Excel: лист «Классика», «Осень 26» или «ТК ПФ». Также можно загрузить плоскую таблицу Excel или CSV с колонками брутто, нетто и выходом."],
     ["menu","Меню с ценами","Чтобы сверить состав и цены продажи.","Фото, PDF или таблица меню."]],
    reports:[
-    ["sales","Продажи бара за месяц","Основа всех управленческих отчётов.",how("iikoOffice: OLAP-отчёт по продажам.","r_keeper: отчёт по продажам блюд.","Таблица: позиция, количество, единица, сумма. Над таблицей укажите период «с ДД.ММ.ГГГГ по ДД.ММ.ГГГГ».")],
+    ["sales","Продажи бара за месяц","Основа всех управленческих отчётов.",how("iikoOffice: OLAP-отчёт по продажам.","r_keeper: отчёт по продажам блюд.","Выгрузите только бар. Колонки: позиция, количество, единица, сумма. Для напитка по ТТК укажите «порция» или «шт», для прямой продажи — складскую единицу. Над таблицей укажите период «с ДД.ММ.ГГГГ по ДД.ММ.ГГГГ».")],
     ["writeoff","Списания","Бой, порча, проливы, дегустации.","Акты списания или таблица: причина, сумма."]]
   }[sec]||[];
   return d;
@@ -155,15 +155,16 @@ function migrate(v1){
   o.findings=(v1.findings||[]).map(f=>Object.assign({src:"manual"},f));
   return o;
 }
-let S=blank();
+let S=blank(), storageRestricted=false;
 try{
   const raw=JSON.parse(localStorage.getItem(KEY)||"null");
   if(raw) S=merge(blank(),raw);
   else{const old=JSON.parse(localStorage.getItem(OLD)||"null"); if(old) S=merge(blank(),migrate(old));}
-}catch(e){}
+}catch(error){storageRestricted=error.name==="SecurityError";}
 let ownState=null;
 const save=()=>{
   if(ownState)return true;
+  if(storageRestricted)return !intakeOnServer();
   try{localStorage.setItem(KEY,JSON.stringify(S));return true;}catch(e){return false;}
 };
 function commitReceiving(change){
@@ -207,7 +208,6 @@ const isDemo=()=>S.mode==="demo";
 const findings=()=>isDemo()?DEMO.findings:S.findings;
 const fst=id=>S.st[id]||{};
 const open=f=>!fst(f.id).status;
-const secOn=k=>isDemo()||Object.values(S.sec[k].docs).some(d=>d&&d.res);
 const started=()=>!!(S.ans.problem&&S.ans.system);
 const venueName=()=>isDemo()?DEMO.venue:(S.venue.name||"Мой бар");
 const q=k=>`<button class="q" data-a="help" data-k="${k}" aria-label="Пояснение">?</button>`;
@@ -265,7 +265,7 @@ function fcard(f,full){
   const state=s.status==="done"?`<span class="tag">Решено${s.choice?": "+esc(s.choice):""}</span>`:s.status==="cal"?`<span class="tag">В календаре: ${esc(s.label)}</span>`:"";
   return `<div class="card"><div class="between" style="align-items:flex-start"><h3>${esc(f.title)}</h3>${f.value?`<span class="val ${f.n?"n":""}">${esc(f.value)}</span>`:""}</div>
    <p class="muted">${esc(f.detail)}</p>${full&&f.solution?`<p class="muted"><b style="color:var(--text2)">Решение:</b> ${esc(f.solution)}</p>`:""}
-   ${state||`<div class="btns"><button class="btn p s" data-a="decide" data-id="${f.id}">Решение</button><button class="btn s" data-a="tocal" data-id="${f.id}">В календарь</button></div>`}</div>`;
+   <div class="finding-actions">${state}<button class="link" data-a="decide" data-id="${esc(f.id)}">${state?"Подробнее":"Рассмотреть"}</button></div></div>`;
 }
 function secFindings(k){
   const l=findings().filter(f=>f.sec===k);
