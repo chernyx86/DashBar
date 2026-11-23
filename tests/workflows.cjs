@@ -340,6 +340,7 @@ assert.equal(recovery.state().data.stockReference.stock.Тоник.qty,9);
 recovery.run("A.invsave()");
 assert.equal(recovery.state().data.counts.length,1);
 assert.equal(recovery.state().data.counts[0].rows[0].fact,0);
+assert.equal(recovery.state().data.counts[0].rows[0].book,null);
 recovery.run("importBackup(backup)");
 assert.equal(recovery.state().venue.name,"Новый бар");
 let pendingRead;
@@ -678,6 +679,25 @@ assert.equal(await pricesAcrossYears.run('handleFile("reports","sales",sales)'),
 assert.equal(pricesAcrossYears.state().data.sales[0].sum,0);
 assert.match(pricesAcrossYears.run('computeReport("r_sales").note'),/Всего 0 ₽/);
 console.log("PASS: chronological prices across calendar years, supplier/unit/VAT separation and accurate zero revenue");
+const asOf=test({mode:"own",step:"app",tab:"stock",venue:{stockName:"Бар"},data:{stock:{Тоник:{qty:9,unit:"шт",countDate:"2026-10-20"}},receipts:[
+  {date:"2026-10-21",warehouse:"Бар",rows:[{pos:"Тоник",qty:1,unit:"шт"}]},
+  {date:"2026-10-22",warehouse:"Бар",rows:[{pos:"Тоник",qty:5,unit:"шт"}]}
+]}});
+asOf.run('A.count();S.draft.date="2026-10-21";S.draft.rows.Тоник="8";A.invsave()');
+assert.equal(asOf.state().data.counts[0].rows[0].book,10);
+assert.equal(asOf.run("effectiveStock().Тоник.qty"),13);
+asOf.run('A.count();S.draft.date="2026-10-20";S.draft.rows.Тоник="3";A.invsave()');
+assert.equal(asOf.state().data.counts.length,2);
+const historical=asOf.state().data.counts.find(count=>count.date==="2026-10-20");
+assert.equal(historical.rows[0].fact,3);
+assert.equal(historical.rows[0].book,null);
+assert.equal(historical.rows[0].diff,null);
+assert.equal(historical.withoutBook,1);
+assert.equal(asOf.run("effectiveStock().Тоник.qty"),13);
+asOf.run('S.data.invoices=[{id:"same",date:"2026-10-21",supplier:"Поставщик",number:"1",rows:[{pos:"Тоник",qty:1,unit:"шт"}]}];postReceipt("same")');
+assert.match(asOf.toasts.at(-1),/может быть уже включён в пересчёт/);
+assert.equal(asOf.state().data.receipts.length,2);
+console.log("PASS: dated inventory excludes later receipts and detects same-day duplicate accounting");
 console.log("PASS: 14 Russian bar phrases, slang definitions, multiple intents, standalone protocol and restricted storage");
 console.log("PASS. Manager workflow through application actions, import including TSV, wrong types, duplicate, totals and invalid date, price scope, findings and calendar, local answer, draft, order, backup, demo isolation, 2500 rows ("+ms+" ms in JS harness).");
 })().catch(e=>{console.error(e);process.exit(1);});

@@ -69,17 +69,17 @@ function sheetHtml(){
   }
   if(s.t==="inv"){
     const d=S.draft||(S.draft={date:todayISO(),q:"",rows:{}});
-    const stock=effectiveStock(), all=invList(stock), qq=(d.q||"").toLowerCase();
+    const stock=effectiveStock(d.date), all=invList(), qq=(d.q||"").toLowerCase();
     const list=all.filter(p=>p.toLowerCase().includes(qq)).slice(0,80);
     const filled=Object.values(d.rows).filter(v=>String(v).trim()!=="").length;
     b=`<div class="between"><h2>Инвентаризация</h2><span class="badge" id="inv-count">${filled} из ${all.length}</span></div>
       <label class="field">Дата<input class="in" id="inv-date" type="date" max="${todayISO()}" value="${esc(d.date)}" data-invd="1" ${d.reference?"disabled":""}></label>
       ${d.formDate?`<p class="muted">Бланк от ${ruDate(d.formDate)} · ${esc(d.warehouse)}</p>`:""}
       <input class="in search" id="inv-q" data-invq="1" placeholder="Поиск позиции" value="${esc(d.q||"")}" aria-label="Поиск">
-      <div class="list" style="max-height:44vh;overflow-y:auto">${list.length?list.map(p=>`<div class="invrow"><div class="nm">${esc(p)}<small>учёт ${fmt(bookOf(p,stock))}</small></div><input data-inv="${esc(p)}" inputmode="decimal" value="${esc(d.rows[p]??"")}" placeholder="факт" aria-label="${esc(p)}"></div>`).join(""):`<div class="empty">Позиций нет. Загрузите остатки или матрицу цен.</div>`}</div>
+      <div class="list" style="max-height:44vh;overflow-y:auto">${list.length?list.map(p=>`<div class="invrow"><div class="nm">${esc(p)}<small>${countHasBook(p,d)?"учёт "+fmt(bookOf(p,stock)):"нужен учётный остаток на эту дату"}</small></div><input data-inv="${esc(p)}" inputmode="decimal" value="${esc(d.rows[p]??"")}" placeholder="факт" aria-label="${esc(p)}"></div>`).join(""):`<div class="empty">Позиций нет. Загрузите остатки или матрицу цен.</div>`}</div>
       <div class="btns">${d.reference?"":'<button class="btn" data-a="invfill">Заполнить учётом</button>'}<button class="btn p" data-a="invsave">Сохранить</button></div>
       ${S.sec.stock.q.how?`<p class="muted">${esc({"На весах":"Снимите массу тары и переведите результат в единицу учёта.","На глаз, десятыми":"Введите оценку в единицах учёта, например 0,4 л.","По-разному":"Сверьте единицу учёта каждой открытой бутылки перед вводом."}[S.sec.stock.q.how]||"")}</p>`:""}
-      <p class="muted">Ввод идёт в черновик: можно закрыть и вернуться. Учёт берётся из загруженных остатков.</p>${close}`;
+      <p class="muted">Ввод идёт в черновик: можно закрыть и вернуться. Учёт учитывает проведённые приходы по выбранную дату включительно.</p>${close}`;
   }
   if(s.t==="settings"){
     const th=S.theme||"auto";
@@ -242,8 +242,10 @@ const A={
  orddown:()=>{const text=orderText();if(text)download("order-"+todayISO()+".txt",text);},
  count:()=>{if(!S.draft)S.draft={date:todayISO(),q:"",rows:{}};sheet={t:"inv"};render(true);},
  invfill:()=>{
-   const stock=effectiveStock();
-   invList(stock).forEach(p=>{S.draft.rows[p]=String(fmt(bookOf(p,stock),3)).replace(/\s/g,"");});
+   const stock=effectiveStock(S.draft.date);
+   const available=invList().filter(p=>countHasBook(p,S.draft));
+   if(!available.length)return toast("Загрузите учётные остатки на дату пересчёта.");
+   available.forEach(p=>{S.draft.rows[p]=String(fmt(bookOf(p,stock),3)).replace(/\s/g,"");});
    sheet={t:"inv"};render(true);toast("Подставлен учёт");
  },
  invsave:()=>{
@@ -257,17 +259,19 @@ const A={
    if(invalid)return toast(`«${invalid}»: введите количество от нуля`);
    const src="count."+date+"."+uid();
    const rows=[], find=[], prices=matrixByPosition();
-   const stock=effectiveStock();
-   let short=0, over=0, unpriced=0;
+   const stock=effectiveStock(date);
+   let short=0, over=0, unpriced=0, withoutBook=0;
    entries.forEach(p=>{
-     const book=bookOf(p,stock), fact=readNumber(d.rows[p]), diff=fact-book;
+     const book=countHasBook(p,d)?bookOf(p,stock):null, fact=readNumber(d.rows[p]);
+     const diff=book===null?null:fact-book;
      const row={pos:p,book,fact,unit:d.reference?.[p]?.unit||(Object.hasOwn(stock,p)?stock[p].unit:"")||S.data.prices[p]?.unit||""};
      if(d.sources&&Object.hasOwn(d.sources,p))row.sources={...d.sources[p],factEdited:fact!==d.sources[p].fact.qty};
      const price=inventoryPrice(row,prices);
      row.diff=diff;
-     row.sum=diff*price;
+     row.sum=diff===null?null:diff*price;
      rows.push(row);
-     if(diff!==0){
+     if(diff===null)withoutBook++;
+     else if(diff!==0){
        const money_=Math.abs(diff)*price;
        if(!price)unpriced++;
        if(diff<0)short+=money_; else over+=money_;
@@ -275,7 +279,7 @@ const A={
      }
    });
    find.sort((a,b)=>b.sum-a.sum);
-   const totals={short,over,unpriced};
+   const totals={short,over,unpriced,...(withoutBook?{withoutBook}:{})};
    const res={doc_type:"Сличительная ведомость",period:date,fits:true,summary:`Инвентаризация от ${ruDate(date)}: ${rows.length} позиций · ${inventoryTotals(totals)}.`,findings:[],missing:[],local:true};
    find.slice(0,6).forEach(f=>{
      const val=(f.diff<0?"−":"+")+fmt(Math.abs(f.diff))+(f.unit?" "+f.unit:"");
@@ -319,10 +323,17 @@ const A={
  chatclear:()=>{S.chat=[];render();},
  shade:(d,el,ev)=>{if(ev.target===el){sheet=null;render(true);}}
 };
-function bookOf(p,stock=effectiveStock()){
+function countHasBook(pos,draft){
+  if(draft.reference&&Object.hasOwn(draft.reference,pos))return true;
+  const snapshot=S.sec.stock.docs.rest?.res?.snapshot?.date||"";
+  const date=S.data.stock[pos]?.countDate||"";
+  return !!draft.date&&snapshot<=draft.date&&date<=draft.date;
+}
+function bookOf(p,stock=effectiveStock(S.draft?.date)){
   if(S.draft?.reference?.[p])return num(S.draft.reference[p].qty);
   if(Object.hasOwn(stock,p))return num(stock[p].qty);
-  const c=S.data.counts[0]; if(c){const r=c.rows.find(x=>x.pos===p); if(r) return r.fact;}
+  const c=S.data.counts.find(count=>!S.draft?.date||count.date<=S.draft.date);
+  if(c){const r=c.rows.find(x=>x.pos===p); if(r) return r.fact;}
   return 0;
 }
 function invList(stock=effectiveStock()){
@@ -379,6 +390,7 @@ app.addEventListener("toggle",ev=>{
 app.addEventListener("change",ev=>{
   const t=ev.target;
   if(t.dataset.docsinboxConflicts!==undefined&&sheet?.t==="docsinboxRegistry"){sheet.conflicts=t.checked;sheet.limit=25;paintDocsInboxRows();return;}
+  if(t.dataset.invd!==undefined&&sheet?.t==="inv"){render(true);document.getElementById("inv-date")?.focus?.();return;}
   if(t.dataset.uploadSelect!==undefined&&sheet?.t==="workbook"){sheet.selected=Number(t.value);render(true);return;}
   if(sheet?.t==="workbook"&&sheet.kind==="splitFacts"){
     if(t.dataset.countDate!==undefined){sheet.date=t.value;render(true);return;}

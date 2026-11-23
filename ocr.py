@@ -205,6 +205,31 @@ def extract_rows(image, words):
     return rows, total
 
 
+def buyer_name(image, words):
+    for x, y, height, word in words:
+        if y >= image.height * .45 or word.casefold().strip(":") != "покупатель":
+            continue
+        # UPD templates may place the buyer label in the right-hand column.
+        nearby = [(xx, token) for xx, yy, _, token in words
+                  if x < xx < min(image.width, x + image.width * .45)
+                  and abs(yy - y) <= max(5, height * .75)]
+        line = " ".join(token for _, token in sorted(nearby))
+        line = re.sub(r"^[\s:()0-9а]*?(?=\b(?:ООО|ИП|АО|ПАО|ОАО|ЗАО|Общество)\b)", "", line, flags=re.I)
+        line = re.sub(r"^общество с ограниченной ответственностью\s+", "ООО ", line, flags=re.I)
+        legal = r"(ООО|ИП|АО|ПАО|ОАО|ЗАО)"
+        quoted = re.match(legal + r'\s*[«"“„]([^»"”]+)[»"”]', line, flags=re.I)
+        if quoted:
+            return f"{quoted[1].upper()} {quoted[2].strip()}"
+        plain = re.match(legal + r"\s+(.+)", line, flags=re.I)
+        if plain:
+            name = re.split(r'\s*\(\d+[а-я]?\)|,|\s+(?=адрес|город|ул\.|ИНН|КПП)',
+                            plain[2], maxsplit=1, flags=re.I)[0]
+            name = name.strip(' «»"“”„.:;')
+            if name and any(letter.isalpha() for letter in name):
+                return f"{plain[1].upper()} {name}"
+    return ""
+
+
 def invoice_fields(image, words):
     width = image.width
     labels = [(x, y) for x, y, _, token in words
@@ -238,7 +263,7 @@ def invoice_fields(image, words):
         elif re.match(r"^(?:ООО|ИП|АО)\b",seller_line,re.I):
             seller = seller_line
         seller = seller.translate(str.maketrans("", "", '«»“”'+chr(34)+chr(39))).strip()
-    return {"supplier":seller,"date":date,"number":document_number}
+    return {"supplier":seller,"buyer":buyer_name(image,words),"date":date,"number":document_number}
 
 
 def complete_gross_amounts(rows, total):

@@ -31,8 +31,8 @@ def decimal_string(value):
     return format(n, "f") if n.is_finite() and 0 <= n < Decimal("1e15") and n.as_tuple().exponent >= -8 else ""
 
 
-def seller_data(invoice):
-    identity = child(child(invoice, "СвПрод"), "ИдСв")
+def party_data(invoice, tag):
+    identity = child(child(invoice, tag), "ИдСв")
     if identity is None:
         return "", ""
     company = child(identity, "СвЮЛУч")
@@ -70,7 +70,8 @@ def parse_edi(data):
         date = datetime.strptime(raw_date, "%d.%m.%Y").date().isoformat()
     except ValueError as error:
         raise EdiError("В УПД отсутствует корректная дата.") from error
-    supplier, supplier_inn = seller_data(invoice)
+    supplier, supplier_inn = party_data(invoice, "СвПрод")
+    buyer, _ = party_data(invoice, "СвПокуп")
     currency = field(child(invoice, "ДенИзм"), "КодОКВ") or field(invoice, "КодОКВ")
     if currency != "643":
         raise EdiError("Поддерживается УПД в российских рублях с кодом валюты 643.")
@@ -91,5 +92,5 @@ def parse_edi(data):
                      "netPrice": decimal_string(field(node, "ЦенаТов")),
                      "netSum": decimal_string(field(node, "СтТовБезНДС")),
                      "gross": decimal_string(field(node, "СтТовУчНал")), "vat": vat})
-    return {"mode": "edi-xml", "supplier": supplier, "supplierInn": supplier_inn, "number": number, "date": date,
+    return {"mode": "edi-xml", "supplier": supplier, "supplierInn": supplier_inn, "buyer": buyer, "number": number, "date": date,
             "total": decimal_string(field(child(table, "ВсегоОпл"), "СтТовУчНалВсего")), "rows": rows}

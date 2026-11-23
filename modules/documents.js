@@ -543,6 +543,7 @@ function applyReceiving(doc,parsed,file){
     &&(number||inv.number?receiveKey(number)===receiveKey(inv.number):signature===rowSignature(inv.rows)));
   if(duplicate)throw new Error("Такая накладная уже есть в реестре. Проверьте дату, номер и поставщика.");
   const invoice={id:uid(),supplierInn:parsed.supplierInn||"",src:"receiving.invoice",date,supplier,sum:total/100,rows,status:"получена",number,filename:file.name,
+    ...(parsed.buyer?{buyer:parsed.buyer}:{}),
     ...(parsed.taxBasis?{taxBasis:parsed.taxBasis,sourceDocumentId:parsed.sourceDocumentId}:{})};
   S.data.invoices=S.data.invoices.concat(invoice);
   const checks=invoiceChecks();

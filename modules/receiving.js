@@ -60,6 +60,7 @@ function invoiceResults(invoices){
       <summary><b>${esc(invoice.supplier||"Поставщик не указан")}${invoice.number?" · № "+esc(invoice.number):""}</b>
       <span class="muted">${invoice.date?ruDate(invoice.date):"Дата не указана"} · ${invoice.rows.length} строк · ${exactMoney(invoice.sum)}</span></summary>
       <p class="muted">${invoiceReceiptStatus(invoice)}${invoice.filename?" · "+esc(invoice.filename):""}</p>
+      ${invoice.buyer?`<p class="muted">Покупатель · ${esc(invoice.buyer)}</p>`:""}
       ${invoice.receiptAt||invoice.status==="проведена"?"":`<button class="btn s" data-a="postreceipt" data-id="${esc(invoice.id)}">Поставить на приход</button>`}
       <div data-invoice-rows></div></details>`).join("")}</div>`:
       `<div class="card"><p class="muted">${invoices.length?"Ничего не найдено. Измените запрос.":"Подключите источник накладных или добавьте ссылку на файл."}</p></div>`}
@@ -106,16 +107,18 @@ const intakeOnServer=()=>!document.documentElement.hasAttribute?.("data-standalo
   ["http:","https:"].includes(location.protocol);
 function blankOcrRow(){return {pos:"",unit:"",qty:"",netPrice:"",netSum:"",vat:"",gross:"",needsReview:false};}
 function renderOcr(s){
-  const input=(label,key,value,index)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
-    ${["qty","netPrice","netSum","vat","gross","total"].includes(key)?'inputmode="decimal"':key==="date"?'type="date"':""} value="${esc(value)}" required></label>`;
+  const input=(label,key,value,index,required=true)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
+    ${["qty","netPrice","netSum","vat","gross","total"].includes(key)?'inputmode="decimal"':key==="date"?'type="date"':""} value="${esc(value)}" ${required?"required":""}></label>`;
   return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":"распознано на сервере DashBar"}</p>
-    <p>Сверьте поставщика, дату, фасовку, количество, цену, НДС и итог с оригиналом. Все поля можно исправить.</p>
+    <p>Сверьте поставщика, покупателя, дату, фасовку, количество, цену, НДС и итог с оригиналом. Все поля можно исправить.</p>
     ${s.mode==="local-ocr"&&!s.detectedRows?'<p class="muted">Строки таблицы не распознаны. Сверьте документ по изображению или загрузите выгрузку ЭДО.</p>':""}
     ${s.preview.length?`<details class="card" open><summary>Изображение документа</summary>
     ${s.preview.map((data,i)=>`<img style="width:100%;height:auto" src="data:image/jpeg;base64,${esc(data)}" alt="Страница ${i+1} накладной">`).join("")}</details>`:""}
     ${s.ocrText?`<details class="card"><summary>Распознанный текст</summary><p style="white-space:pre-wrap">${esc(s.ocrText)}</p></details>`:""}
     <form data-f="confirmocr" class="col">
     ${input("Поставщик","supplier",s.supplier)}
+    ${input("Покупатель","buyer",s.buyer,null,false)}
+    ${s.buyer?"":'<p class="muted">Если в оригинале указан покупатель, внесите его из документа.</p>'}
     ${input("Номер","number",s.number)}
     ${input("Дата","date",s.date)}
     ${s.rows.map((row,i)=>`<fieldset class="card"><legend>Строка ${i+1}</legend>
@@ -137,7 +140,7 @@ async function openOcr(item,state,mode){
   const xml=/\.xml$/i.test(item.name);
   const result=await incomingRequest("/documents/"+item.id+(xml?"/edi":"/recognize"),{method:xml?"GET":"POST"});
   if(S!==state||S.mode!==mode||sheet?.t!=="receivingsources")return "Откройте документ в очереди для проверки.";
-  sheet={t:"ocr",queueId:item.id,name:item.name,mode:result.mode,supplierInn:result.supplierInn||"",supplier:result.supplier||"",number:result.number||"",
+  sheet={t:"ocr",queueId:item.id,name:item.name,mode:result.mode,supplierInn:result.supplierInn||"",supplier:result.supplier||"",buyer:result.buyer||"",number:result.number||"",
     date:result.date||"",total:result.total||"",detectedRows:result.rows?.length||0,rows:result.rows?.length?result.rows:[blankOcrRow()],
     preview:(result.preview||[]).filter(data=>/^[a-z0-9+/=]+$/i.test(data)),ocrText:result.ocrText||""};
   render(true);
@@ -169,7 +172,7 @@ function confirmOcr(){
     const rows=[...sourceRows,{pos:"Итого",sum:String(total/100)}];
     commitReceiving(()=>{
       const res=applyReceiving("invoice",{title:"Накладная · распознана и проверена",rows,metadata:[],
-        sourceDocumentId:draft.queueId,supplierInn:draft.supplierInn,taxBasis:"gross"},{name:draft.name});
+        sourceDocumentId:draft.queueId,supplierInn:draft.supplierInn,buyer:draft.buyer?.trim(),taxBasis:"gross"},{name:draft.name});
       S.sec.receiving.docs={...S.sec.receiving.docs,invoice:{name:draft.name,res,local:true}};
     });
     sheet={t:"receivingsources"};

@@ -25,6 +25,8 @@ class RussianInvoiceTest(unittest.TestCase):
         draw.text((250, 100), "№ 48151 от 21.11.2026", fill="black", font=font, anchor="lm")
         label(.072, 180, "Продавец")
         label(.28, 186, "ООО Северный Бар")
+        label(.57, 180, "Покупатель:")
+        label(.75, 170, 'ООО «Южный Бар»')
         label(.14, 385, "Наименование")
         label(.38, 385, "Цена")
         rows = [(516, "Сироп", 2, 120, 240, 48, 288), (630, "Тоник", 3, 100, 300, 60, 360)]
@@ -41,6 +43,7 @@ class RussianInvoiceTest(unittest.TestCase):
             image.save(data, format=kind, resolution=150)
             result = recognize(f"test.{extension}", data.getvalue())
         self.assertEqual(result["supplier"], "ООО Северный Бар")
+        self.assertEqual(result["buyer"], "ООО Южный Бар")
         self.assertEqual(result["date"], "2026-11-21")
         self.assertEqual(result["number"], "48151")
         self.assertEqual(result["total"], "648")

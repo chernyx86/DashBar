@@ -11,12 +11,13 @@ function stockIndex(stock){
   }
   return keys;
 }
-function effectiveStock(){
+function effectiveStock(asOf=""){
   const stock={...S.data.stock};
   const keys=stockIndex(stock);
   const snapshotDate=S.sec.stock.docs.rest?.res?.snapshot?.date||"";
   const warehouse=S.sec.stock.docs.rest?.res?.snapshot?.warehouse||S.venue.stockName.trim()||"Бар";
   for(const receipt of S.data.receipts){
+    if(asOf&&receipt.date>asOf)continue;
     if(receiveKey(receipt.warehouse)!==receiveKey(warehouse)||(snapshotDate&&receipt.date<=snapshotDate))continue;
     for(const row of receipt.rows){
       const key=receiveKey(row.pos);
@@ -80,14 +81,14 @@ function stockReceiptsBlock(){
 }
 function inventoryTotals(count){
   if(count.unpriced==null)return `сохранённая оценка: недостачи ${money(count.short)}, излишки ${money(count.over)}`;
-  return `недостачи ${money(count.short)}, излишки ${money(count.over)}${count.unpriced?` · без оценки: ${count.unpriced} строк`:""}`;
+  return `недостачи ${money(count.short)}, излишки ${money(count.over)}${count.unpriced?` · без оценки: ${count.unpriced} строк`:""}${count.withoutBook?` · без учётного остатка: ${count.withoutBook}`:""}`;
 }
 function inventoryPrice(row,prices){
   const matrix=prices.get(receiveKey(row.pos));
   return receiveUnit(row.unit)&&receiveUnit(row.unit)===receiveUnit(matrix?.unit)?num(matrix.price):0;
 }
 function possibleResort(count){
-  return count.unpriced===0&&count.short>0&&count.over>0&&Math.abs(count.short-count.over)/Math.max(count.short,count.over)<0.15;
+  return !count.withoutBook&&count.unpriced===0&&count.short>0&&count.over>0&&Math.abs(count.short-count.over)/Math.max(count.short,count.over)<0.15;
 }
 function countSources(count){
   if(!count.warehouse||!count.rows.some(row=>row.sources))return "";

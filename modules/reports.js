@@ -45,8 +45,11 @@ function computeReport(key){
   if(key==="r_inv"){
     const c=inv[0]; if(!c) return null;
     const prices=matrixByPosition();
-    const rows=c.rows.slice().sort((a,b)=>Math.abs((b.fact-b.book)*inventoryPrice(b,prices))-Math.abs((a.fact-a.book)*inventoryPrice(a,prices))).slice(0,40)
-      .map(r=>[r.pos,fmt(r.book),fmt(r.fact),(r.fact-r.book>0?"+":"")+fmt(r.fact-r.book)]);
+    const cost=r=>Number.isFinite(r.book)?Math.abs((r.fact-r.book)*inventoryPrice(r,prices)):0;
+    const rows=c.rows.slice().sort((a,b)=>cost(b)-cost(a)).slice(0,40)
+      .map(r=>{const diff=r.fact-r.book;
+        return [r.pos,Number.isFinite(r.book)?fmt(r.book):"—",fmt(r.fact),Number.isFinite(r.book)?(diff>0?"+":"")+fmt(diff):"—"];
+      });
     return {cols:["Позиция","Учёт","Факт","Разница"],rows,note:`Инвентаризация от ${ruDate(c.date)}. ${inventoryTotals(c)}.`};
   }
   if(key==="r_rest"){
