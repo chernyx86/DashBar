@@ -783,6 +783,14 @@ assert.equal(catalogTest.run('catalogSuggestions({supplier:"Другой"},{pos:
 assert.equal(catalogTest.run('catalogSuggestions({supplier:"Искажённый",supplierInn:"1234567890"},{pos:"Блю Манки Вит Эль"})[0].learned'),true);
 assert.equal(catalogTest.run('catalogSuggestions({supplier:"Другой"},{pos:"Блю Манки Вит Эль"}).length'),0);
 assert.equal(catalogTest.run('catalogSuggestions({supplier:"Другой"},{pos:""}).length'),0);
+assert.equal(catalogTest.run('invoiceDisplayName({pos:"Пиво «Corona Extra» 0,33 л*24"})'),"Corona Extra");
+assert.equal(catalogTest.run('invoiceDisplayName({pos:"Пиво «Corona Extra» 0,33 л*24",stockMatch:{name:"Корона"}})'),"Корона");
+assert.equal(catalogTest.run('invoiceDisplayName({pos:"Пиво без кавычек 0,5 л"})'),"Пиво без кавычек 0,5 л");
+assert.equal(catalogTest.run('catalogSuggestions({}, {pos:"Пиво \\"Corona Extra\\" 0,33 л"}, [{name:"Пиво Корона, шт",unit:"шт"},{name:"Corona Cero",unit:"шт"}])[0]?.name'),"Пиво Корона, шт");
+assert.equal(catalogTest.run('catalogSuggestions({}, {pos:"Пиво Корона Cero 0,33 л"}, [{name:"Пиво Корона, шт",unit:"шт"}]).length'),0);
+assert.equal(catalogTest.run('catalogSuggestions({}, {pos:"Пиво Корона 0,33 л"}, [{name:"Corona Extra 0,33 л",unit:"шт"},{name:"Corona Cero 0,33 л",unit:"шт"}]).length'),1);
+assert.equal(catalogTest.run('catalogSuggestions({}, {pos:"Пиво Хайдеггер Хель 0,5 л"}, [{name:"Heidegger Hell 0,5 л",unit:"л"}])[0]?.name'),"Heidegger Hell 0,5 л");
+assert.equal(catalogTest.run('catalogSuggestions({}, {pos:"Heidegger Hell 0,5 л"}, [{name:"Хайдеггер Хель 0,75 л",unit:"л"}]).length'),0);
 catalogTest.context.fetch=async()=>Response.json({ok:true});
 catalogTest.run('incoming.token="test";incoming.connected=true;sheet={t:"ocr",name:"scan.pdf",queueId:124,supplier:"Другой",number:"C2",date:"2026-10-02",buyer:"",total:"6384",preview:[],detectedRows:1,rows:[{pos:"Пиво BLUE MONKЕY WHEAT ALE 0,5 л*12",unit:"уп",qty:"4",gross:"6384",netPrice:"",netSum:"",vat:""}]};');
 assert.match(catalogTest.run('renderOcr(sheet)'),/Возможные позиции вашего бара/);
