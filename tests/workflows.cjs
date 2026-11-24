@@ -698,6 +698,32 @@ asOf.run('S.data.invoices=[{id:"same",date:"2026-10-21",supplier:"Поставщ
 assert.match(asOf.toasts.at(-1),/может быть уже включён в пересчёт/);
 assert.equal(asOf.state().data.receipts.length,2);
 console.log("PASS: dated inventory excludes later receipts and detects same-day duplicate accounting");
+const mixedFolder="https://drive.google.com/drive/folders/testFolder123";
+const folderOffline=test({mode:"own",step:"app",tab:"receiving"},{standalone:true,protocol:"file:"});
+folderOffline.context.form={dataset:{f:"directintake"},values:{kind:"invoice",link:mixedFolder}};
+folderOffline.context.fetch=()=>{throw new Error("Folder must not fetch from offline HTML");};
+await folderOffline.run("submitIncoming(form)");
+assert.match(folderOffline.run("incoming.notice"),/серверную сборку DashBar/);
+const folderServer=test({mode:"own",step:"app",tab:"receiving"});
+const field={value:"",focus(){}};
+folderServer.get("drive-intake").querySelector=()=>field;
+folderServer.context.form={dataset:{f:"directintake"},values:{kind:"invoice",link:mixedFolder}};
+folderServer.run('incoming.token="test-token";incoming.connected=true');
+await folderServer.run("submitIncoming(form)");
+assert.equal(field.value,mixedFolder);
+assert.equal(folderServer.get("drive-intake").open,true);
+const folderRequests=[];
+folderServer.context.fetch=async(url,options)=>{
+  folderRequests.push([url,options.method,options.body?JSON.parse(options.body):null]);
+  if(url.endsWith("?source=drive"))return Response.json({drive:"Добавлено: 1."});
+  return Response.json({documents:[],next_cursor:null});
+};
+folderServer.context.form={dataset:{f:"configureintake",source:"drive"},values:{link:mixedFolder,bar_only:"on",since:""}};
+await folderServer.run("submitIncoming(form)");
+assert.deepEqual(folderRequests,[["/api/intake/drive","PUT",{link:mixedFolder,since:null,recursive:false,bar_only:true}],
+  ["/api/intake/sync?source=drive","POST",null],["/api/intake","GET",null]]);
+assert.match(folderServer.run("incoming.notice"),/Добавлено: 1/);
+console.log("PASS: Drive folder link detection, offline instructions, server routing and first sync");
 console.log("PASS: 14 Russian bar phrases, slang definitions, multiple intents, standalone protocol and restricted storage");
 console.log("PASS. Manager workflow through application actions, import including TSV, wrong types, duplicate, totals and invalid date, price scope, findings and calendar, local answer, draft, order, backup, demo isolation, 2500 rows ("+ms+" ms in JS harness).");
 })().catch(e=>{console.error(e);process.exit(1);});

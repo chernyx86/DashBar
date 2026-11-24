@@ -372,6 +372,7 @@ app.addEventListener("input",ev=>{
     invoiceSearch.limit=25;
     paintInvoiceResults();
   }
+  if(t.dataset.intakeLink!==undefined)showIntakeLinkHint(t);
   if(t.id==="chat-in")draft=t.value;
 });
 function updInvCount(){

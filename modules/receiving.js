@@ -99,7 +99,7 @@ function vReceiving(){
   ${matrixBlock()}
   ${secFindings("receiving")}`;
 }
-const incoming={token:"",queue:[],nextCursor:null,notice:"",connected:false,assistantAvailable:false,busy:false};
+const incoming={driveLink:"",token:"",queue:[],nextCursor:null,notice:"",connected:false,assistantAvailable:false,busy:false};
 const scanImage=/\.(?:jpe?g|png|webp)$/i;
 const incomingLabels={drive:"Google Drive",sheets:"Google Таблицы",telegram:"Telegram",external:"Входящий API",edi:"ЭДО",docsinbox:"DocsInBox"};
 const intakeKind=`<select class="in" name="kind" aria-label="Тип документа"><option value="invoice">Накладная</option><option value="matrix">Матрица цен</option></select>`;
@@ -198,20 +198,22 @@ function receivingSources(){
   return `<h2>Источники и загрузка по ссылке</h2>
   <details class="card"><summary>Прямая ссылка на файл</summary>
     <form class="col" data-f="directintake">
-      <label class="field">HTTPS-ссылка<input class="in" type="url" name="link" required autocomplete="off"></label>
+      <label class="field">HTTPS-ссылка<input class="in" type="url" name="link" data-intake-link required autocomplete="off"></label>
+      <p class="muted" data-drive-link-hint hidden>${intakeOnServer()?"Ссылка ведёт на папку Google Drive. Продолжите в настройках папки.":"Ссылка ведёт на папку Google Drive. Подключите её в разделе «Папка Google Drive» на сервере DashBar. В этой HTML-сборке доступны отдельные файлы."}</p>
       ${intakeKind}<button class="btn s">Загрузить по ссылке</button>
-    </form><p class="muted">Подходит ссылка на сам файл. Источник должен разрешать загрузку из браузера без входа.</p></details>
+    </form><p class="muted">Прямая ссылка позволяет загрузить один файл. Папка Google Drive подключается через сервер приёмки.</p></details>
   ${intakeOnServer()?`<form class="col" data-f="connectintake">
     <label class="field">Ключ оператора сервера<input class="in" type="password" name="token" autocomplete="off" required></label>
     <button class="btn s">${incoming.connected?"Переподключить очередь":"Подключить очередь"}</button></form>
   ${incoming.connected?'<div class="btns"><button class="btn s" data-a="syncintake">Обновить документы</button></div>':""}
-  <details class="card"><summary>Папка Google Drive</summary>
+  <details class="card" id="drive-intake" ${incoming.driveLink?"open":""}><summary>Папка Google Drive</summary>
     <p class="muted">PDF и фото из папки появятся в очереди. Откройте документ для распознавания.</p>
     <form class="col" data-f="configureintake" data-source="drive">
-      <label class="field">Ссылка на папку<input class="in" name="link" type="url" required></label>
-      <label class="field">Файлы, изменённые с<input class="in" name="since" type="date" required></label>
+      <label class="field">Ссылка на папку<input class="in" name="link" type="url" value="${esc(incoming.driveLink)}" required></label>
+      <label class="field">Дата изменения в Drive (необязательно)<input class="in" name="since" type="date"></label>
       <label class="row"><input type="checkbox" name="recursive">Включить подпапки</label>
-      <button class="btn s">Сохранить источник</button></form></details>
+      <label class="row"><input type="checkbox" name="bar_only" checked>Только файлы с пометкой «Бар»</label>
+      <button class="btn s">Подключить и загрузить документы</button></form></details>
   <details class="card"><summary>Google Таблица</summary>
     <form class="col" data-f="configureintake" data-source="sheets">
       <label class="field">Ссылка на нужный лист<input class="in" name="link" type="url" required></label>
@@ -271,6 +273,34 @@ async function refreshIncoming(append=false){
   incoming.assistantAvailable=data.assistant_available===true;
   return data;
 }
+function isDriveFolderLink(link){
+  try{
+    const url=new URL(link);
+    return url.protocol==="https:"&&!url.username&&!url.password&&url.hostname==="drive.google.com"&&
+      /^\/drive\/(?:u\/\d+\/)?folders\/[A-Za-z0-9_-]{8,200}\/?$/.test(url.pathname);
+  }catch{return false;}
+}
+function showIntakeLinkHint(input){
+  const form=input.form;
+  if(!form)return;
+  const hint=form.querySelector("[data-drive-link-hint]");
+  if(hint)hint.hidden=!isDriveFolderLink(input.value.trim());
+}
+function routeDriveFolder(link){
+  if(!intakeOnServer()){
+    paintIncoming("Это папка Google Drive. Откройте серверную сборку DashBar и подключите её в «Приёмка → Источники накладных → Папка Google Drive».");
+    return;
+  }
+  incoming.driveLink=link;
+  const settings=document.getElementById("drive-intake");
+  const field=settings?.querySelector('input[name="link"]');
+  if(field){
+    settings.open=true;
+    field.value=link;
+    (incoming.connected?field:document.querySelector('[data-f="connectintake"] input[name="token"]'))?.focus?.();
+  }
+  paintIncoming(incoming.connected?"Проверьте фильтр и нажмите «Подключить и загрузить документы».":"Сначала подключите очередь ключом оператора. Ссылка уже внесена в настройки папки.");
+}
 async function directIntake(link){
   const url=new URL(link);
   if(url.protocol!=="https:"||url.username||url.password)throw new Error("Укажите HTTPS-ссылку на файл.");
@@ -329,6 +359,7 @@ async function importIncoming(file,kind,mode,state){
 function submitIncoming(form){
   const data=new FormData(form), link=String(data.get("link")||"").trim(), kind=data.get("kind");
   const mode=S.mode, state=S;
+  if(form.dataset.f==="directintake"&&isDriveFolderLink(link))return routeDriveFolder(link);
   return runIncoming(async()=>{
     if(form.dataset.f==="directintake"){
       const result=await importIncoming(await directIntake(link),kind,mode,state);
@@ -375,10 +406,17 @@ function submitIncoming(form){
       }catch(e){return "Документ загружен. Сервер не снял его с очереди. Можно убрать его вручную.";}
     }
     const source=form.dataset.source;
-    const body=source==="drive"?{link,since:data.get("since"),recursive:data.has("recursive")}:
+    const body=source==="drive"?{link,since:data.get("since")||null,recursive:data.has("recursive"),bar_only:data.has("bar_only")}:
       source==="sheets"?{link}:Object.fromEntries(data);
     if(source==="telegram"&&!body.token)delete body.token;
     const result=await incomingRequest("/"+source,{method:source==="sheets"?"POST":"PUT",body});
+    if(source==="drive"){
+      incoming.driveLink=link;
+      try{
+        const status=await incomingRequest("/sync?source=drive",{method:"POST"});
+        return "Источник сохранён. "+(status.drive||"Очередь обновлена.");
+      }finally{await refreshIncoming();}
+    }
     form.reset();
     await refreshIncoming();
     if(source==="sheets")return result.accepted?"Лист добавлен в очередь. Выберите тип документа.":"Эта версия листа уже поступала в очередь.";

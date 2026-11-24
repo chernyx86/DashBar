@@ -12,6 +12,7 @@ import sqlite3
 from contextlib import asynccontextmanager, closing
 from datetime import date
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
@@ -260,11 +261,19 @@ def drive_auth():
     raise RemoteError("Google Drive: настройте сервисный аккаунт или ключ API для общей папки.")
 
 
+def drive_bar_file(name, bar_only):
+    marker = r"(?:^|[-–—(,]\s*){}(?=$|[\s.),–—-])"
+    stem = Path(name).stem
+    if re.search(marker.format("(?:кухня|кальян)"), stem, re.I):
+        return False
+    return not bar_only or bool(re.search(marker.format("бар"), stem, re.I))
+
+
 async def sync_drive(store, client, config):
     headers, params = await asyncio.to_thread(drive_auth)
     pending = [(config["folder"], config["resource"])]
     visited = set()
-    count, failed = 0, 0
+    count, failed, excluded = 0, 0, 0
     while pending:
         folder, key = pending.pop()
         if folder in visited:
@@ -292,6 +301,9 @@ async def sync_drive(store, client, config):
                 stamp = record.get("modifiedTime") or record.get("createdTime") or ""
                 if stamp[:10] < config["since"] or int(record.get("size") or 0) > MAX_BYTES:
                     continue
+                if not drive_bar_file(name, config.get("bar_only", False)):
+                    excluded += 1
+                    continue
                 revision = file_id + ":" + stamp
                 if store.has_seen("drive", revision):
                     continue
@@ -308,7 +320,8 @@ async def sync_drive(store, client, config):
             if not page.get("nextPageToken"):
                 break
             query["pageToken"] = page["nextPageToken"]
-    return f"Добавлено: {count}." + (f" Ошибок скачивания: {failed}. Файлы будут проверены снова." if failed else "")
+    return (f"Добавлено: {count}." + (f" Пропущено по фильтру бара: {excluded}." if excluded else "")
+            + (f" Ошибок скачивания: {failed}. Файлы будут проверены снова." if failed else ""))
 
 
 async def telegram_call(client, token, method, body):
@@ -355,8 +368,9 @@ async def sync_telegram(store, client, config):
 
 class DriveConfig(BaseModel):
     link: str = Field(max_length=1000)
-    since: date
+    since: date | None = None
     recursive: bool = False
+    bar_only: bool = False
 
 
 class TelegramConfig(BaseModel):
@@ -384,11 +398,13 @@ async def iiko_read(client, values):
     return [str(org.get("name", "")) for org in result["organizations"]]
 
 
-async def synchronize(app):
+async def synchronize(app, source=None):
     if app.state.lock.locked():
         return
     async with app.state.lock:
         for name, worker in (("drive", sync_drive), ("telegram", sync_telegram)):
+            if source and name != source:
+                continue
             config = app.state.store.setting(name)
             if not config:
                 continue
@@ -525,7 +541,7 @@ def configure_drive(request: Request, values: DriveConfig):
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     request.app.state.store.set_setting("drive", {"folder": folder, "resource": key,
-        "since": values.since.isoformat(), "recursive": values.recursive}, audit=True)
+        "since": values.since.isoformat() if values.since else "", "recursive": values.recursive, "bar_only": values.bar_only}, audit=True)
     return {"ok": True}
 
 
@@ -570,8 +586,13 @@ async def configure_iiko(request: Request, values: IikoConfig):
 
 
 @app.post("/api/intake/sync", dependencies=[Depends(operator)])
-async def sync(request: Request):
-    await synchronize(request.app)
+async def sync(request: Request, source: Literal["drive", "telegram"] | None = None):
+    if source and request.app.state.lock.locked():
+        raise HTTPException(409, "Источник сохранён. Синхронизация уже идёт. Обновите документы через минуту.")
+    await synchronize(request.app, source)
+    if source:
+        status = request.app.state.status.get(source)
+        return {source: status} if status else {}
     return request.app.state.status
 
 

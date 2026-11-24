@@ -36,6 +36,14 @@ def remote(req):
               {"properties":{"sheetId":22,"title":"Фрукты '2026'","index":1}}]})
         assert req.url.path.endswith("/values/'Фрукты ''2026'''")
         return httpx.Response(200,json={"values":[["Позиция","Цена","Единица","Поставщик"],["Лимон","198,00","кг","Фрукты"]]})
+    if req.url.path.endswith("/files") and "'mixedFolder123' in parents" in req.url.params["q"]:
+        return httpx.Response(200,json={"files":[
+            {"id":"mixedBar123","name":"22.11 - Бар, 100.pdf","mimeType":"application/pdf","modifiedTime":"2026-11-22T10:00:00Z"},
+            {"id":"mixedKitchen123","name":"22.11 - Кухня.pdf","mimeType":"application/pdf","modifiedTime":"2026-11-22T10:00:00Z"},
+            {"id":"mixedUnmarked123","name":"Документ.pdf","mimeType":"application/pdf","modifiedTime":"2026-11-22T10:00:00Z"}
+        ]})
+    if req.url.path.endswith("/files/mixedBar123"):
+        return httpx.Response(200,content=b"bar only")
     if req.url.path.endswith("/files"):
         assert "'testFolder123' in parents" in req.url.params["q"]
         return httpx.Response(200,json={"files":[{"id":"testFile123","name":"invoice.csv","modifiedTime":"2026-11-20T20:00:00Z"}]})
@@ -88,5 +96,12 @@ with tempfile.TemporaryDirectory(dir=".") as tmp:
         assert len(set(seen)-existing)==260
         assert c.get(f"/api/intake/documents/{seen[-1]}",headers=operator).content==body
         print(f"PASS: 260 uploaded files × 50 rows; 250 + 12 queue items across two pages, including 2 prior fixtures ({perf_counter()-start:.2f} s)")
+        settings={"link":"https://drive.google.com/drive/folders/mixedFolder123","bar_only":True}
+        assert c.put("/api/intake/drive",headers=operator,json=settings).status_code==200
+        messages=c.post("/api/intake/sync?source=drive",headers=operator).json()
+        assert messages=={"drive":"Добавлено: 1. Пропущено по фильтру бара: 2."},messages
+        messages=c.post("/api/intake/sync?source=drive",headers=operator).json()
+        assert messages=={"drive":"Добавлено: 0. Пропущено по фильтру бара: 2."},messages
+        print("PASS: mixed Drive folder, optional date, bar filter, duplicate skip")
     asyncio.run(mock.aclose())
 print("PASS: authenticated queue, Google Sheets gid, invalid links, Drive folder sync, inbound API, duplicate and reviewed handling")
