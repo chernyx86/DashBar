@@ -19,7 +19,7 @@ def check(result):
         line = {key: row.get(key, '') for key in ('pos', 'unit', 'qty', 'gross')}
         try:
             qty, gross = Decimal(line['qty']), Decimal(line['gross'])
-            line['unitPrice'] = str(gross / qty) if qty > 0 and gross > 0 else ''
+            line['unitPrice'] = format(gross / qty, 'f') if qty > 0 and gross > 0 else ''
         except (InvalidOperation, ZeroDivisionError):
             line['unitPrice'] = ''
         rows.append(line)
