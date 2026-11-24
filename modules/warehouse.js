@@ -16,10 +16,9 @@ function effectiveStock(asOf=""){
   const keys=stockIndex(stock);
   const invoices=new Map(S.data.invoices.map(invoice=>[invoice.id,invoice]));
   const snapshotDate=S.sec.stock.docs.rest?.res?.snapshot?.date||"";
-  const warehouse=S.sec.stock.docs.rest?.res?.snapshot?.warehouse||S.venue.stockName.trim()||"Бар";
   for(const receipt of S.data.receipts){
     if(asOf&&receipt.date>asOf)continue;
-    if(receiveKey(receipt.warehouse)!==receiveKey(warehouse)||(snapshotDate&&receipt.date<=snapshotDate))continue;
+    if(!barWarehouse(receipt.warehouse)||(snapshotDate&&receipt.date<=snapshotDate))continue;
     for(const [lineIndex,row] of receipt.rows.entries()){
       const key=receiveKey(row.pos);
       const item=keys.get(key);
