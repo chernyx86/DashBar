@@ -14,19 +14,28 @@ function stockIndex(stock){
 function effectiveStock(asOf=""){
   const stock={...S.data.stock};
   const keys=stockIndex(stock);
+  const invoices=new Map(S.data.invoices.map(invoice=>[invoice.id,invoice]));
   const snapshotDate=S.sec.stock.docs.rest?.res?.snapshot?.date||"";
   const warehouse=S.sec.stock.docs.rest?.res?.snapshot?.warehouse||S.venue.stockName.trim()||"Бар";
   for(const receipt of S.data.receipts){
     if(asOf&&receipt.date>asOf)continue;
     if(receiveKey(receipt.warehouse)!==receiveKey(warehouse)||(snapshotDate&&receipt.date<=snapshotDate))continue;
-    for(const row of receipt.rows){
+    for(const [lineIndex,row] of receipt.rows.entries()){
       const key=receiveKey(row.pos);
       const item=keys.get(key);
       if(keys.has(key)&&(!item||item.unit!==receiveUnit(row.unit)))continue;
       const name=item?.name||row.pos;
       if(Object.hasOwn(S.data.stock,name)&&S.data.stock[name].countDate>=receipt.date)continue;
       const previous=Object.hasOwn(stock,name)?num(stock[name].qty):0;
-      Object.defineProperty(stock,name,{value:{qty:previous+row.qty,unit:row.unit},enumerable:true,writable:true,configurable:true});
+      // Value is reconstructible only for positions consisting entirely of
+      // these receipts. Never impute a value to a historical stock snapshot.
+      const prior=Object.hasOwn(stock,name)?stock[name]:null, receiptOnly=!Object.hasOwn(S.data.stock,name);
+      const inv=invoices.get(receipt.invoiceId), source=inv?.rows?.[row.sourceLine??lineIndex];
+      const original=source&&receiveKey(source.pos)===receiveKey(row.pos)&&receiveUnit(source.unit)===receiveUnit(row.unit)&&source.qty===row.qty?source:null;
+      const sum=readNumber(row.sum??original?.sum),p=invoicePack(original||row);
+      const value=receiptOnly&&Number.isFinite(sum)&&sum>=0&&(!prior||Number.isFinite(prior.receiptValue))?(prior?.receiptValue||0)+sum:undefined;
+      const physical=receiptOnly&&p&&(!prior||prior.physicalUnit===p.baseUnit)?(prior?.physicalQty||0)+p.baseQty:undefined;
+      Object.defineProperty(stock,name,{value:{qty:previous+row.qty,unit:row.unit,...(value!==undefined?{receiptValue:value}:{}),...(physical!==undefined?{physicalQty:physical,physicalUnit:p.baseUnit}:{})},enumerable:true,writable:true,configurable:true});
       keys.set(key,{name,unit:receiveUnit(row.unit)});
     }
   }
@@ -40,6 +49,9 @@ function postReceipt(id){
       throw new Error("Накладная уже проведена. Остаток сохранён без изменений.");
     if(!invoice.number||!invoice.supplier||!invoice.date||parseDate(invoice.date)!==invoice.date)
       throw new Error("Для прихода нужны поставщик, номер и дата накладной.");
+    const address=String(S.venue.address||"").trim(),delivery=String(invoice.deliveryAddress||"").trim();
+    if(Number(S.venue.points)>1&&(!address||!delivery))throw new Error("Для нескольких заведений укажите адрес этого бара в профиле и проверьте адрес накладной в сопоставлении.");
+    if(address&&delivery&&addressKey(address)!==addressKey(delivery))throw new Error("Адрес накладной отличается от адреса этого бара. Сверьте адрес и исправьте распознанную строку в сопоставлении; на другой бар приход не проводится.");
     const date=invoice.date;
     if(date>todayISO())throw new Error("Накладную с будущей датой пока нельзя поставить на приход.");
     const from=S.sec.stock.docs.rest?.res?.snapshot?.date;
@@ -47,26 +59,39 @@ function postReceipt(id){
       throw new Error("Загрузите датированный остаток бара перед приходом. Так можно исключить двойной учёт.");
     if(from&&date<=from)throw new Error("Дата накладной совпадает с датой учётных остатков или раньше неё. Проверьте приход в учёте.");
     const stock=effectiveStock(), index=stockIndex(stock);
-    const rows=invoice.rows.map(row=>{
+    const newNames=new Set();
+    const rows=invoice.rows.map((row,sourceLine)=>{
       const qty=readNumber(row.qty);
       const unit=receiveUnit(row.unit);
-      const key=receiveKey(row.pos);
+      const match=suggestedStockMatch(invoice,row);
+      const key=receiveKey(match?.name||row.pos);
       const existing=index.get(key);
       if(!key||!unit||!Number.isFinite(qty)||qty<=0)throw new Error(`«${row.pos}»: проверьте количество и единицу.`);
-      if(index.has(key)&&(!existing||existing.unit!==unit))throw new Error(`«${row.pos}»: единица или название неоднозначны. Сверьте позицию на складе.`);
+      if(index.has(key)&&!existing)throw new Error(`«${row.pos}»: название неоднозначно. Сверьте позицию на складе.`);
+      const targetUnit=existing?.unit||match?.unit||invoicePack(row)?.baseUnit||unit;
+      if(match&&existing&&receiveUnit(match.unit)!==existing.unit)throw new Error(`«${row.pos}»: единица складской позиции изменилась. Сопоставьте заново.`);
+      const converted=invoiceQuantityIn(row,targetUnit);
+      if(converted===null||!Number.isFinite(converted)||converted<=0)throw new Error(`«${row.pos}»: не удалось пересчитать количество в ${targetUnit}. Сверьте фасовку.`);
       if(existing&&S.data.stock[existing.name]?.countDate>=date)
         throw new Error(`«${row.pos}»: приход может быть уже включён в пересчёт.`);
-      const name=existing?.name||row.pos;
-      index.set(key,{name,unit});
-      return {pos:name,unit:row.unit,qty};
+      const name=existing?.name||match?.name||row.pos;
+      if(!existing)newNames.add(name);
+      index.set(key,{name,unit:targetUnit});
+      return {pos:name,unit:targetUnit,qty:converted,sourceLine,...(Number.isFinite(readNumber(row.sum))?{sum:readNumber(row.sum)}:{})};
     });
     if(!rows.length)throw new Error("В накладной нет товарных строк.");
     const warehouse=S.sec.stock.docs.rest?.res?.snapshot?.warehouse||S.venue.stockName.trim()||"Бар";
-    if(!confirm(`Поставить ${rows.length} строк накладной № ${invoice.number} на склад «${warehouse}»? Подтвердите, что все строки относятся к бару.`))return;
+    const changes=rows.filter((r,i)=>r.pos!==invoice.rows[i].pos||r.unit!==receiveUnit(invoice.rows[i].unit)||r.qty!==invoice.rows[i].qty);
+    const preview=changes.slice(0,6).map(r=>`${r.pos}: ${fmt(r.qty,4)} ${r.unit}`).join("\n");
+    if(!confirm(`Поставить ${rows.length} строк накладной № ${invoice.number} на склад «${warehouse}» (${venueName()})?${delivery?"\nАдрес поставки: "+delivery:"\nАдрес поставки не указан."}${preview?"\nПосле пересчёта:\n"+preview+(changes.length>6?"\n… и другие позиции":""):""}${newNames.size?"\nНовых позиций: "+newNames.size+". Проверьте, не нужно ли сопоставить их с существующими.":""}\nПодтвердите, что все строки относятся к бару.`))return;
     const receiptAt=new Date().toISOString();
     commitReceiving(()=>{
       S.data.receipts=S.data.receipts.concat({invoiceId:invoice.id,date,warehouse,receiptAt,rows});
-      S.data.invoices=S.data.invoices.map(item=>item.id===invoice.id?{...item,receiptAt}:item);
+      S.data.invoices=S.data.invoices.map(item=>item.id===invoice.id?{...item,receiptAt,rows:item.rows.map((source,i)=>{
+        const r=rows[i];return source.stockMatch||r.pos!==source.pos||r.unit!==receiveUnit(source.unit)||r.qty!==source.qty?
+          {...source,stockMatch:{name:r.pos,unit:r.unit}}:source;
+      })}:item);
+      refreshReceivingFindings(invoiceChecks());
     });
     render(true);toast("Приход отражён на складе DashBar");
   }catch(e){toast(e.message);}
@@ -77,7 +102,9 @@ function stockReceiptsBlock(){
   const recent=S.data.receipts.slice(-10).reverse();
   return `<div class="sec"><h2>Приходы в DashBar</h2><p class="muted">Проведено: ${S.data.receipts.length}. ${baseDate?"На остаток влияют приходные движения позже "+ruDate(baseDate)+". ":""}Изменения отражаются в локальном складе.</p>
     ${table(["Дата","Склад","Строк"],recent.map(entry=>[ruDate(entry.date),entry.warehouse,String(entry.rows.length)]))}
-    <details class="card"><summary>Текущие остатки с приходами</summary>${table(["Позиция","Количество"],stockEntries().map(([name,item])=>[name,fmt(item.qty,4)+" "+item.unit]))}</details></div>`;
+    <details class="card"><summary>Текущие остатки с приходами</summary>${table(["Позиция","Количество","Объём / вес","Цена ед. учёта","Стоимость"],stockEntries().map(([name,item])=>[name,fmt(item.qty,4)+" "+item.unit,
+      item.physicalUnit?fmt(item.physicalQty,4)+" "+item.physicalUnit:"—",Number.isFinite(item.receiptValue)&&item.physicalQty>0?exactMoney(item.receiptValue/item.physicalQty)+"/"+item.physicalUnit:"—",Number.isFinite(item.receiptValue)?exactMoney(item.receiptValue):"—"]))}
+      <p class="muted">Стоимость показана только для остатков, полностью сформированных известными приходами DashBar. Для учётных остатков без себестоимости — прочерк.</p></details></div>`;
 }
 function inventoryTotals(count){
   if(count.unpriced==null)return `сохранённая оценка: недостачи ${money(count.short)}, излишки ${money(count.over)}`;

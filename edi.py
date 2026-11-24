@@ -46,6 +46,19 @@ def party_data(invoice, tag):
     return "", ""
 
 
+def consignee_address(invoice):
+    # Use only the explicitly labelled consignee, never the legal buyer address.
+    consignee=child(invoice,"ГрузПолуч")
+    address=child(consignee,"Адрес")
+    info=child(address,"АдрИнф")
+    if info is not None:
+        return field(info,"АдрТекст")[:250]
+    domestic=child(address,"АдрРФ")
+    if domestic is None:
+        return ""
+    return ", ".join(field(domestic,k) for k in ("Индекс","Город","НаселПункт","Улица","Дом","Корпус","Кварт") if field(domestic,k))[:250]
+
+
 def parse_edi(data):
     if len(data) > MAX_XML:
         raise EdiError("XML больше 5 МБ.")
@@ -92,5 +105,5 @@ def parse_edi(data):
                      "netPrice": decimal_string(field(node, "ЦенаТов")),
                      "netSum": decimal_string(field(node, "СтТовБезНДС")),
                      "gross": decimal_string(field(node, "СтТовУчНал")), "vat": vat})
-    return {"mode": "edi-xml", "supplier": supplier, "supplierInn": supplier_inn, "buyer": buyer, "number": number, "date": date,
+    return {"mode": "edi-xml", "supplier": supplier, "supplierInn": supplier_inn, "buyer": buyer, "number": number, "date": date,"deliveryAddress":consignee_address(invoice),
             "total": decimal_string(field(child(table, "ВсегоОпл"), "СтТовУчНалВсего")), "rows": rows}

@@ -307,6 +307,51 @@ def expanded_grid(image, words):
     return gray.rotate(angle,fillcolor=255,resample=Image.Resampling.BICUBIC),mask,scale,boundaries,total_end,cells,angle
 
 
+def transport_grid(image,words):
+    """Recognize the distinct commodity table of form 1-Т (no VAT columns)."""
+    w,h=image.size
+    names=[(x,y) for x,y,_,t in words if 'наименование' in t.casefold()]
+    prices=[(x,y) for x,y,_,t in words if re.sub(r'\W','',t.casefold())=='цена']
+    amounts=[(x,y) for x,y,_,t in words if re.sub(r'\W','',t.casefold())=='сумма']
+    anchors=[(nx,ny,ax,ay) for nx,ny in names for px,py in prices for ax,ay in amounts
+             if .035*w<nx-px<.15*w and .30*w<ax-nx<.49*w and abs(ny-py)<.03*w and abs(ny-ay)<.03*w and ny<h*.65]
+    if not anchors:return None
+    nx,ny,ax,ay=min(anchors,key=lambda a:a[1])
+    total_marks=[(x,y) for x,y,_,t in words if x<nx and y>ny+.07*w and re.sub(r'\W','',t.casefold()).translate(OCR_TOTAL_LABEL)=='итого']
+    if not total_marks:return None
+    tx,ty=min(total_marks,key=lambda a:a[1]);scale=w/900
+    gray=ImageOps.grayscale(image);small=gray.resize((900,round(h/scale)),Image.Resampling.LANCZOS)
+    base=small.point(lambda p:255 if p<190 else 0)
+    top,bottom=max(0,round(ny/scale)-40),min(small.height,round(ty/scale)+24)
+    best=None
+    for angle in (0,-.25,.25,-.5,.5,-.75,.75,-1,1,-1.25,1.25,-1.5,1.5,-2,2):
+        mask=base.rotate(angle,fillcolor=0);profile=column_profile(mask,(45,top,855,bottom))
+        score=sum(v*v for v in profile if v>=95)
+        if best is None or score>best[0]:best=(score,angle,mask,profile)
+    _,angle,mask,profile=best;lines=profile_peaks(profile,top,100)
+    def transform(x,y):
+        dx,dy=x/scale-450,y/scale-small.height/2;a=radians(angle)
+        return 450+cos(a)*dx+sin(a)*dy,small.height/2-sin(a)*dx+cos(a)*dy
+    hx,hy=transform(nx,ny);amount_x,_=transform(ax,ay);_,total_y=transform(tx,ty)
+    before=[v for v in lines if v<total_y-1];after=[v for v in lines if v>total_y+1]
+    if not before or not after or after[0]-before[-1]>28:return None
+    end,total_end=before[-1],after[0]
+    starts=[b for a,b in zip(lines,lines[1:]) if hy+12<a<hy+60 and 5<=b-a<=16 and b<end]
+    if not starts:return None
+    start=starts[0];boundaries=[v for v in lines if start<=v<=end]
+    if not 2<=len(boundaries)<=17 or any(not 9<=b-a<=85 for a,b in zip(boundaries,boundaries[1:])):return None
+    factor=(amount_x-hx)/(699-344);expected=[round(hx+(x-344)*factor) for x in (217,264,313,527,566,684,747)]
+    if min(expected)<12 or max(expected)>888:return None
+    profile=column_profile(mask,(0,start+3,900,end-3),True);columns=[]
+    for x in expected:
+        lo,hi=max(0,x-10),min(900,x+11);found=max(range(lo,hi),key=lambda i:profile[i])
+        if profile[found]<90:return None
+        columns.append(found)
+    if any(b-a<10 for a,b in zip(columns,columns[1:])):return None
+    cells=[(columns[a],columns[b]) for a,b in ((2,3),(3,4),(0,1),(1,2),(5,6))]
+    return gray.rotate(angle,fillcolor=255,resample=Image.Resampling.BICUBIC),mask,scale,boundaries,total_end,cells,angle
+
+
 def grid_cell(image,mask,scale,box,short=False,total=False):
     a,y,b,z=box
     def peak_x(x):
@@ -471,6 +516,87 @@ def resolve_grid_document(rows,doc_total,doc_net=None):
     return chosen[1] if chosen and not chosen[2] else None
 
 
+def resolve_grid_core(rows,doc_total):
+    """If tax/price columns are unreadable, preserve independently read quantities and totals.
+
+    No quantity or amount is derived solely from a price. Only a unique best
+    allocation of printed gross amounts matching the independent total is used.
+    """
+    if not doc_total or not rows:return None
+    total=Decimal(doc_total)
+    if total<0:return None
+    states={Decimal(0):(0,[],False)}
+    for row in rows:
+        votes=row.get('votes',[{} for _ in GRID_KEYS])
+        gross={g for g in row['candidates'][-1] if 0<=g<=total and g==g.quantize(Decimal('.01'))}
+        if not gross:return None
+        next_states={}
+        for subtotal,(score,items,tied) in states.items():
+            for value in gross:
+                amount=subtotal+value
+                if amount>total:continue
+                new_score=score+votes[-1].get(value,0)
+                old=next_states.get(amount)
+                if old is None or new_score>old[0]:next_states[amount]=(new_score,items+[value],tied)
+                elif new_score==old[0]:next_states[amount]=(old[0],old[1],True)
+                if len(next_states)>10000:return None
+        states=next_states
+    chosen=states.get(total)
+    if not chosen or chosen[2]:return None
+    result=[]
+    for row,amount in zip(rows,chosen[1]):
+        votes=row.get('votes',[{} for _ in GRID_KEYS])[0]
+        quantities={q for q in row['candidates'][0] if q>0}
+        score=max((votes.get(q,0) for q in quantities),default=-1)
+        best=[q for q in quantities if votes.get(q,0)==score]
+        result.append((best[0] if len(best)==1 else None,amount))
+    return result
+
+
+def extract_transport_rows(image,words,scratch,deadline,options,layout,high_image=None):
+    gray,mask,scale,lines,total_end,columns,angle=layout
+    if high_image is not None:
+        gray=ImageOps.grayscale(high_image).rotate(angle,fillcolor=255,resample=Image.Resampling.BICUBIC);scale=gray.width/900
+    rows=[]
+    def read_numbers(cell,a,b,y):
+        reads=[grid_text(cell,scratch,deadline,options,'number',lang,binary,psm)
+               for lang,binary,psm in (('eng',True,7),('rus',True,7),('eng',False,7),('eng',True,8))]
+        reads.append(number_in_column(words,(y+5)/mask.height*image.height,image.width*.013,(a-3)/900*image.width,(b+3)/900*image.width))
+        return reads
+    for y,z in zip(lines,lines[1:]):
+        if deadline-monotonic()<5:return [],''
+        cells=[grid_cell(gray,mask,scale,(a,y,b,z),short=i>0) for i,(a,b) in enumerate(columns)]
+        pos=' '.join(grid_text(cells[0],scratch,deadline,options,'text','rus+eng').replace('|',' ').split()).strip(' —_')
+        units={grid_text(cells[1],scratch,deadline,options,'unit',lang,binary).casefold().strip(' .|') for lang,binary in (('rus',True),('rus',False),('rus+eng',False))}
+        a,b=columns[1]
+        units.update(re.sub(r'[^а-я]','',t.casefold()) for x,yy,_,t in words if (a-3)/900*image.width<=x<(b+3)/900*image.width
+                     and (y-2)/mask.height*image.height<=yy<(y+13)/mask.height*image.height)
+        units&={'шт','кг','уп','бут','л','г','мл'};unit=units.pop() if len(units)==1 else ''
+        choices=[[],[],[],[],[]];votes=[{} for _ in GRID_KEYS]
+        for index,key in ((2,0),(3,1),(4,4)):
+            a,b=columns[index];reads=read_numbers(cells[index],a,b,y)
+            choices[key]=decimal_candidates(reads,key!=0)
+            for raw in reads:
+                for v in decimal_candidates([raw],key!=0):votes[key][v]=votes[key].get(v,0)+1
+        rows.append({'pos':pos,'unit':unit,'candidates':choices,'votes':votes})
+    a,b=columns[-1];cell=grid_cell(gray,mask,scale,(a-1,lines[-1],b,total_end),total=True)
+    totals=decimal_candidates([grid_text(cell,scratch,deadline,options,'number',lang,binary)
+                                 for lang,binary in (('eng',True),('rus',True),('eng',False))],False)
+    resolved=[(total,resolve_grid_core(rows,format(total,'f'))) for total in totals]
+    resolved=[(total,values) for total,values in resolved if values]
+    total,values=resolved[0] if len(resolved)==1 else (None,None)
+    result=[]
+    for i,row in enumerate(rows):
+        qty,gross=values[i] if values else (None,None)
+        if gross is not None:
+            # The printed price is corroboration only, never a source of qty.
+            compatible=[q for q in row['candidates'][0] if q>0 and any(abs(q*p-gross)<=q*Decimal('.005')+Decimal('.01') for p in row['candidates'][1])]
+            if len(compatible)==1:qty=compatible[0]
+        result.append({'pos':row['pos'],'unit':row['unit'],'qty':format(qty,'f') if qty is not None else '',
+                       'gross':format(gross,'f') if gross is not None else '', 'netPrice':'','netSum':'','vat':'','needsReview':True})
+    return result,format(total,'f') if total is not None else ''
+
+
 def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_image=None):
     layout=layout or expanded_grid(image,words)
     if not layout:
@@ -539,6 +665,7 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
     net_matches={n for n,v in product(net_print|net_cell,vat_print|vat_cell) if n+v==total_value}
     doc_net=next(iter(net_matches)) if len(net_matches)==1 else None
     chosen=resolve_grid_document(result,total,doc_net)
+    basic=resolve_grid_core(result,total) if not chosen else None
     for i,row in enumerate(result):
         candidates=row.pop('candidates')
         row.pop('votes',None)
@@ -551,6 +678,10 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
             # Without a unique consistent set, leave disputed financial fields
             # blank; the product and unit remain visible for review.
             row.update(zip(GRID_KEYS,('' for _ in GRID_KEYS)))
+            if basic:
+                qty,gross=basic[i]
+                row['qty']=format(qty,'f') if qty is not None else ''
+                row['gross']=format(gross,'f')
         row['needsReview']=True
     return result,total
 
@@ -680,7 +811,68 @@ def invoice_fields(image, words):
         elif re.match(r"^(?:ООО|ИП|АО)\b",seller_line,re.I):
             seller = re.sub(r'\s*\(\d+[а-я]?\)\s*$', '', seller_line)
         seller = seller.translate(str.maketrans("", "", '«»“”'+chr(34)+chr(39))).strip()
-    return {"supplier":seller,"supplierInn":seller_inn(image,words),"buyer":buyer_name(image,words),"date":date,"number":document_number}
+    return {"supplier":seller,"supplierInn":seller_inn(image,words),"buyer":buyer_name(image,words),"date":date,"number":document_number,
+            "deliveryAddress":delivery_address(image,words)}
+
+
+def delivery_address(image,words):
+    """Read an explicitly labelled consignee/delivery address, not the buyer's legal address."""
+    width=image.width
+    candidates=[]
+    for x,y,h,t in words:
+        label=re.sub(r'\W','',t.casefold())
+        if y>image.height*.45 or x>width*.5:
+            continue
+        if not (label.startswith('грузополуч') or (label=='адрес' and any(
+            abs(yy-y)<width*.012 and 0<xx-x<width*.18 and tt.casefold().startswith('доставк') for xx,yy,_,tt in words))):
+            continue
+        nearby=[entry for entry in words if x+width*.025<entry[0]<width*.94 and abs(entry[1]-y)<max(h*1.3,width*.012)]
+        line=' '.join(page_text(nearby).split())
+        # Require a street/house marker; a bare company or a postal code is not an address.
+        street=re.search(r'(?<!\w)(?:улица|ул\.?|переулок|пер\.?|проспект|пр-т|шоссе|наб\.?|бульвар|площадь)\s+([А-Яа-яЁё-]{2,})',line,re.I)
+        if not street or not re.search(r'\d',line[street.start():]):
+            continue
+        if street[1].casefold() in {'по','окпо','инн','кпп','адрес','получатель','грузополучатель','дом'}:
+            continue
+        start=street.start()
+        postal=re.search(r'(?<!\d)\d{6}(?!\d)',line[:start])
+        city=re.search(r'(?<!\w)г\.\s*[А-Яа-яЁё-]+',line[:start],re.I)
+        if postal:start=postal.start()
+        elif city:start=city.start()
+        result=re.split(r'\s*\(\d+[а-я]?\)\s*|\b(?:ИНН|КПП|ОКПО|плательщик|документ)\b',line[start:],maxsplit=1,flags=re.I)[0].strip(' ,;')
+        if 8<=len(result)<=250 and re.search(r'\d',result[street.start()-start:]):candidates.append(result)
+    unique=list(dict.fromkeys(candidates))
+    return unique[0] if len(unique)==1 else ''
+
+
+def transport_header(image,words,high_image,scratch,deadline,options):
+    """Read number and date from explicitly labelled right-hand cells of form 1-Т."""
+    w,h=image.size
+    date_labels=[(x,y) for x,y,_,t in words if t.casefold()=='дата' and x>w*.6 and y<h*.2 and any(
+        0<xx-x<w*.12 and abs(yy-y)<w*.015 and tt.casefold().startswith('составлен') for xx,yy,_,tt in words)]
+    if len(date_labels)!=1:return {}
+    x,y=date_labels[0]
+    right_label=max((xx for xx,yy,_,tt in words if x<xx<x+w*.12 and abs(yy-y)<w*.015 and tt.casefold().startswith('составлен')),default=x)
+    number_labels=[(xx,yy) for xx,yy,_,t in words if t.strip()=='№' and xx>w*.65 and h*.008<y-yy<h*.035]
+    if len(number_labels)!=1:return {}
+    source=high_image if high_image is not None else image;sx,sy=source.width/w,source.height/h
+    left=max(right_label+w*.035,number_labels[0][0]+w*.01);right=min(w*.97,left+w*.095)
+    if right-left<w*.04:return {}
+    def read_cell(center):
+        cell=ImageOps.autocontrast(ImageOps.grayscale(source.crop((round(left*sx),round((center-h*.008)*sy),round(right*sx),round((center+h*.008)*sy)))))
+        return [grid_text(cell,scratch,deadline,options,'number',lang,binary,7) for lang,binary in (('eng',False),('rus',False),('eng',True))]
+    raw_numbers=read_cell(number_labels[0][1]);numbers=[v for v in raw_numbers if re.fullmatch(r'\d{1,14}',v)]
+    dates=[]
+    for raw in read_cell(y):
+        match=re.fullmatch(r'(\d{2})[.,/-]?(\d{2})[.,/-]?(20\d{2})',raw)
+        if not match:continue
+        try:dates.append(calendar_date(int(match[3]),int(match[2]),int(match[1])).isoformat())
+        except ValueError:pass
+    result={}
+    for key,values in (('number',numbers),('date',dates)):
+        agreed={v for v in values if values.count(v)>=2}
+        if len(agreed)==1:result[key]=agreed.pop()
+    return result
 
 
 def complete_gross_amounts(rows, total):
@@ -715,7 +907,8 @@ def recognize(name, data):
         fields, total, angle = {}, "", None
         for index, page in enumerate(pages,1):
             image, words, combined, angle = scan_page(read_image(page),folder/"work.png",deadline,options,angle)
-            layout=expanded_grid(image,words)
+            transport=bool(re.search(r'товарно\s*[-–—]?\s*транспортная\s+накладная',combined,re.I))
+            layout=transport_grid(image,words) if transport else expanded_grid(image,words)
             high_image=None
             if layout and Path(name).suffix.lower()=='.pdf' and deadline-monotonic()>15:
                 try:
@@ -726,11 +919,14 @@ def recognize(name, data):
                         high_image=high_image.rotate(angle,expand=True)
                 except RecognitionError:
                     pass
-            rows, page_total = extract_expanded_rows(image,words,folder/"cell.png",deadline,options,layout,high_image) if layout else ([], '')
-            if not rows:
+            rows, page_total = (extract_transport_rows(image,words,folder/"cell.png",deadline,options,layout,high_image) if transport else
+                                extract_expanded_rows(image,words,folder/"cell.png",deadline,options,layout,high_image)) if layout else ([], '')
+            if not rows and not transport:
                 rows, page_total = extract_rows(image,words)
             if index==1:
                 fields = invoice_fields(image, words)
+                if transport and deadline-monotonic()>8:
+                    fields.update(transport_header(image,words,high_image,folder/'transport-header.png',deadline,options))
                 if not fields['supplierInn'] and deadline-monotonic()>6:
                     fields['supplierInn']=retry_seller_inn(image,words,high_image,folder/'inn.png',deadline,options)
             if len(all_rows)+len(rows)>MAX_ROWS:

@@ -44,13 +44,106 @@ function invoiceReceiptStatus(invoice){
   if(invoice.receiptAt)return "На приходе DashBar";
   return invoice.status==="проведена"?"Проведена":"Ожидает прихода";
 }
+// Original invoice quantities are not changed. Multipliers apply only to
+// an explicitly marked packaging unit, never to a count of bottles/items.
+function invoicePack(row){
+  const qty=readNumber(row.qty), unit=receiveUnit(row.unit), name=String(row.pos||"");
+  const unitAliases={бутылка:"бут",бутылки:"бут",бутылок:"бут",упак:"уп",упаковка:"уп",упаковки:"уп",коробка:"кор",коробок:"кор",ящик:"ящ",банка:"шт",банок:"шт",кега:"кег"};
+  const source=Object.hasOwn(unitAliases,unit)?unitAliases[unit]:unit;
+  if(!Number.isFinite(qty)||qty<=0)return null;
+  if(["л","мл","кг","г"].includes(source)){
+    const scale=STOCK_UNIT_SCALE[source];return {baseUnit:scale[0],baseQty:qty*scale[1],pieceQty:null,packCount:null,volume:null,volumeUnit:scale[0]};
+  }
+  const explicit=[...name.matchAll(/(?:^|[^\d\p{L}])(\d+(?:[,.]\d+)?)\s*(мл|л|кг|г)(?![\p{L}])(?:\s*[*×xх]\s*(\d{1,4})(?!\d))?/giu)];
+  const implicit=[...name.matchAll(/(?:бутылка|бут\.?|банка|кег)\s*(\d+[,.]\d{1,3})\s*(?:[*×xх]\s*(\d{1,4}))?(?![\d.,])/giu)];
+  const sizes=explicit.map(m=>({amount:readNumber(m[1]),unit:receiveUnit(m[2]),pack:m[3]?Number(m[3]):null}));
+  if(!sizes.length)for(const m of implicit)sizes.push({amount:readNumber(m[1]),unit:"л",pack:m[2]?Number(m[2]):null});
+  const reverse=[...name.matchAll(/(?:^|[^\d\p{L}])(\d{1,4})\s*(?:[*×xх]|(?:шт\.?\s*)?по)\s*(\d+(?:[,.]\d+)?)\s*(мл|л|кг|г)(?![\p{L}])/giu)];
+  if(sizes.length===1&&reverse.length===1&&sizes[0].amount===readNumber(reverse[0][2])&&sizes[0].unit===receiveUnit(reverse[0][3])){
+    if(sizes[0].pack&&sizes[0].pack!==Number(reverse[0][1]))return null;
+    sizes[0].pack=Number(reverse[0][1]);
+  }
+  if(sizes.length>1)return null;
+  const size=sizes[0];
+  const packed=["уп","кор","ящ"].includes(source), countable=["бут","шт","кег"].includes(source);
+  if(!packed&&!countable)return null;
+  if(packed&&!size?.pack){
+    if(size)return null;
+    const counts=[...name.matchAll(/(?:^|[^\d\p{L}])(\d{1,4})\s*(?:шт\.?|штук)(?![\p{L}])/giu)];
+    if(counts.length!==1)return null;
+    const pieces=qty*Number(counts[0][1]);
+    return Number.isSafeInteger(pieces)&&pieces>0?{baseUnit:"шт",baseQty:pieces,pieceQty:pieces,packCount:Number(counts[0][1]),volume:null,volumeUnit:"шт"}:null;
+  }
+  const pieces=qty*(packed?size.pack:1);
+  if(!Number.isFinite(pieces)||pieces<=0||!Number.isSafeInteger(pieces))return null;
+  if(size){
+    const scale=STOCK_UNIT_SCALE[size.unit], single=size.amount*scale[1];
+    if(!Number.isFinite(single)||single<=0||single>1000||size.pack>1000)return null;
+    return {baseUnit:scale[0],baseQty:pieces*single,pieceQty:pieces,packCount:size.pack||null,volume:single,volumeUnit:scale[0]};
+  }
+  return countable?{baseUnit:"шт",baseQty:pieces,pieceQty:pieces,packCount:null,volume:null,volumeUnit:"шт"}:null;
+}
+function invoiceQuantityIn(row,target){
+  const direct=convertQuantity(readNumber(row.qty),row.unit,target);
+  if(direct!==null)return direct;
+  const pack=invoicePack(row);
+  if(!pack)return null;
+  if(receiveUnit(target)==="шт"&&pack.pieceQty!==null)return pack.pieceQty;
+  if(receiveUnit(target)==="бут"&&pack.pieceQty!==null&&/(?:бутыл|(?:^|\s)бут(?:[.\s]|$))/i.test(row.pos+" "+row.unit))return pack.pieceQty;
+  return convertQuantity(pack.baseQty,pack.baseUnit,target);
+}
+function invoicePackLabel(row){
+  const p=invoicePack(row);
+  if(!p)return "Не определено";
+  return [p.volume!==null?fmt(p.volume,4)+" "+p.volumeUnit+"/ед.":"",p.packCount?fmt(p.packCount,0)+" ед./уп.":"",fmt(p.baseQty,4)+" "+p.baseUnit].filter(Boolean).join(" · ");
+}
+function ocrRowSummary(row){
+  const qty=readNumber(row.qty),gross=readNumber(row.gross),pack=invoicePack(row);
+  return [invoicePackLabel(row),qty>0&&Number.isFinite(gross)?"Цена единицы: "+exactMoney(gross/qty):"Цена будет рассчитана из суммы и количества",pack&&Number.isFinite(gross)?exactMoney(gross/pack.baseQty)+"/"+pack.baseUnit:""].filter(Boolean).join(" · ");
+}
+function addressKey(value){return receiveKey(value).replace(/[.,;:()№]/g," ").replace(/\s+/g," ").trim();}
+function suggestedStockMatch(invoice,row){
+  if(row.stockMatch)return row.stockMatch;
+  const prior=S.data.invoices.filter(inv=>inv.id!==invoice.id&&inv.receiptAt&&receiveKey(inv.supplier)===receiveKey(invoice.supplier))
+    .flatMap(inv=>inv.rows.filter(r=>receiveKey(r.pos)===receiveKey(row.pos)&&receiveUnit(r.unit)===receiveUnit(row.unit)&&r.stockMatch).map(r=>r.stockMatch));
+  const unique=new Map(prior.map(m=>[receiveKey(m.name)+"|"+receiveUnit(m.unit),m]));
+  return unique.size===1?[...unique.values()][0]:null;
+}
+function renderInvoiceMapping(s){
+  const inv=S.data.invoices.find(i=>i.id===s.id);
+  if(!inv)return '<p>Накладная не найдена.</p>';
+  const names=Object.keys(effectiveStock());
+  return `<h2>Сопоставление со складом</h2><p class="muted">Выберите точное название из склада iiko или введите проверенное название новой позиции. Похожие названия не объединяются автоматически.</p>
+    <form data-f="mapinvoice" class="col"><label class="field">Адрес поставки<input class="in" name="address" value="${esc(inv.deliveryAddress||"")}" placeholder="Адрес грузополучателя, если указан"></label>
+    <datalist id="stock-names">${names.map(name=>`<option value="${esc(name)}"></option>`).join("")}</datalist>
+    ${inv.rows.map((row,i)=>`<label class="field">${esc(row.pos)} · ${esc(invoicePackLabel(row))}<input class="in" name="row${i}" list="stock-names" value="${esc(suggestedStockMatch(inv,row)?.name||"")}" placeholder="Оставить исходное название"></label>`).join("")}
+    <p class="muted">Складское количество пересчитывается только при однозначной фасовке. Исходное название и количество накладной сохраняются.</p><p role="status">${esc(s.error||"")}</p><button class="btn p">Сохранить сопоставление</button></form>`;
+}
+function saveInvoiceMapping(form){
+  const s=sheet,inv=S.data.invoices.find(i=>i.id===s?.id);
+  if(!inv||inv.receiptAt||inv.status==="проведена")return;
+  try{
+    const fields=new FormData(form),stock=effectiveStock(),index=stockIndex(stock);
+    const rows=inv.rows.map((row,i)=>{
+      const name=String(fields.get("row"+i)||"").trim();
+      if(!name){const {stockMatch,...rest}=row;return rest;}
+      const key=receiveKey(name),existing=index.get(key);
+      if(index.has(key)&&!existing)throw new Error(`«${name}»: несколько складских позиций с таким названием.`);
+      const unit=existing?.unit||invoicePack(row)?.baseUnit||receiveUnit(row.unit);
+      if(invoiceQuantityIn(row,unit)===null)throw new Error(`«${row.pos}»: не удалось перевести количество в ${unit}. Проверьте фасовку.`);
+      return {...row,stockMatch:{name:existing?.name||name,unit}};
+    });
+    commitReceiving(()=>{S.data.invoices=S.data.invoices.map(i=>i.id===inv.id?{...i,deliveryAddress:String(fields.get("address")||"").trim(),rows}:i);refreshReceivingFindings(invoiceChecks());});
+    sheet=null;render(true);toast("Сопоставление сохранено. Приход ещё не проведён.");
+  }catch(error){s.error=error.message;render(true);}
+}
 function invoiceResults(invoices){
   const words=receiveKey(invoiceSearch.query).split(" ").filter(Boolean);
   const found=words.length?invoices.filter(invoice=>{
-    const metadata=receiveKey([invoice.supplier,invoice.number,invoice.filename].filter(Boolean).join(" "));
+    const metadata=receiveKey([invoice.supplier,invoice.number,invoice.filename,invoice.deliveryAddress].filter(Boolean).join(" "));
     if(words.every(word=>metadata.includes(word)))return true;
     return invoice.rows.some(row=>{
-      const item=receiveKey(row.pos);
+      const item=receiveKey([row.pos,row.stockMatch?.name].filter(Boolean).join(" "));
       return words.every(word=>metadata.includes(word)||item.includes(word));
     });
   }):invoices;
@@ -61,6 +154,7 @@ function invoiceResults(invoices){
       <span class="muted">${invoice.date?ruDate(invoice.date):"Дата не указана"} · ${invoice.rows.length} строк · ${exactMoney(invoice.sum)}</span></summary>
       <p class="muted">${invoiceReceiptStatus(invoice)}${invoice.filename?" · "+esc(invoice.filename):""}</p>
       ${invoice.buyer?`<p class="muted">Покупатель · ${esc(invoice.buyer)}</p>`:""}
+      <p class="muted">Адрес поставки · ${esc(invoice.deliveryAddress||"не указан")}</p>
       ${invoice.receiptAt||invoice.status==="проведена"?"":`<button class="btn s" data-a="postreceipt" data-id="${esc(invoice.id)}">Поставить на приход</button>`}
       <div data-invoice-rows></div></details>`).join("")}</div>`:
       `<div class="card"><p class="muted">${invoices.length?"Ничего не найдено. Измените запрос.":"Подключите источник накладных или добавьте ссылку на файл."}</p></div>`}
@@ -72,9 +166,12 @@ function paintInvoiceResults(){
 }
 function invoiceRows(invoice){
   const tax=invoice.taxBasis==="gross"?" с НДС":"";
-  return table(["Позиция","Кол-во","Цена"+tax,"Сумма"+tax],invoice.rows.map(row=>[
-    row.pos,fmt(row.qty,4)+(row.unit?" "+row.unit:""),exactMoney(row.price),exactMoney(row.sum)
-  ]));
+  const rows=invoice.rows.map(row=>{const p=invoicePack(row);return [row.stockMatch?.name||row.pos,fmt(row.qty,4)+(row.unit?" "+row.unit:""),invoicePackLabel(row),exactMoney(row.sum/row.qty),p?exactMoney(row.sum/p.baseQty)+"/"+p.baseUnit:"—",exactMoney(row.sum)];});
+  const canMap=!invoice.receiptAt&&invoice.status!=="проведена";
+  return table(["Позиция","Кол-во","Фасовка и объём","Цена"+tax,"Цена ед. учёта","Сумма"+tax],rows)+
+    (!invoice.taxBasis?'<p class="muted">Налоговая основа стоимости в исходнике не подтверждена.</p>':"")+
+    (invoice.rows.some(r=>r.calculatedSum)?'<p class="muted">Для строк без суммы в исходнике стоимость рассчитана из количества и указанной цены. Сверьте с оригиналом.</p>':"")+
+    (canMap?`<button class="btn s" data-a="mapinvoice" data-id="${esc(invoice.id)}">Сопоставить со складом</button>`:"");
 }
 function vReceiving(){
   if(isDemo()) return `<div class="sec"><div class="between"><div class="row"><h2>Накладные</h2>${q("unposted")}</div><span class="muted">с 05.11</span></div>
@@ -110,7 +207,7 @@ function renderOcr(s){
   const input=(label,key,value,index,required=true)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
     ${["qty","netPrice","netSum","vat","gross","total"].includes(key)?'inputmode="decimal"':key==="date"?'type="date"':""} value="${esc(value)}" ${required?"required":""}></label>`;
   const calculatedLabels={qty:"количество",netPrice:"цена",netSum:"сумма без НДС",vat:"НДС",gross:"сумма с НДС"};
-  const pending=s.rows.filter(row=>row.needsReview||!row.pos||!row.unit||["qty","netPrice","netSum","vat","gross"].some(key=>row[key]==="" )).length;
+  const pending=s.rows.filter(row=>row.needsReview||!row.pos||!row.unit||["qty","gross"].some(key=>row[key]==="" )).length;
   return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":"распознано на сервере DashBar"}</p>
     <p>Сверьте поставщика, покупателя, дату, фасовку, количество, цену, НДС и итог с оригиналом. Все поля можно исправить.</p>
     <div class="res" role="status"><b>Строк распознано: ${s.detectedRows}</b><span>${pending?`Нужно проверить: ${pending}.`:"Сверьте данные с оригиналом перед сохранением."}</span></div>
@@ -122,6 +219,8 @@ function renderOcr(s){
     ${input("Поставщик","supplier",s.supplier)}
     ${input("ИНН поставщика (необязательно)","supplierInn",s.supplierInn||"",null,false)}
     ${input("Покупатель","buyer",s.buyer,null,false)}
+    ${input("Адрес поставки / грузополучателя","deliveryAddress",s.deliveryAddress||"",null,false)}
+    ${s.deliveryAddress?"":'<p class="muted">Адрес не удалось прочитать надёжно. При нескольких заведениях сверьте адрес грузополучателя с оригиналом.</p>'}
     ${s.buyer?"":'<p class="muted">Если в оригинале указан покупатель, внесите его из документа.</p>'}
     ${input("Номер","number",s.number)}
     ${input("Дата","date",s.date)}
@@ -131,12 +230,14 @@ function renderOcr(s){
       ${row.needsReview&&!row.calculatedGross?'<p class="muted">Проверьте наименование, фасовку и суммы по оригиналу. Пустые поля не удалось определить надёжно.</p>':row.rounding?'<p class="muted">Цена за единицу округлена. Сверьте сумму без НДС по оригиналу.</p>':""}
       ${input("Товар и фасовка","pos",row.pos,i)}
       <div class="row">${input("Единица","unit",row.unit,i)}${input("Количество","qty",row.qty,i)}</div>
-      <div class="row">${input("Цена без НДС","netPrice",row.netPrice,i)}${input("Сумма без НДС","netSum",row.netSum,i)}</div>
-      <div class="row">${input("НДС по строке","vat",row.vat,i)}${input("Сумма с НДС","gross",row.gross,i)}</div>
+      ${input(s.documentWarning?"Сумма позиции":"Сумма с НДС","gross",row.gross,i)}
+      <p class="res" id="ocr-summary-${i}">${esc(ocrRowSummary(row))}</p>
+      <details><summary>Реквизиты для сверки НДС (если указаны)</summary>
+      <div class="col">${input("Цена без НДС","netPrice",row.netPrice,i,false)}${input("Сумма без НДС","netSum",row.netSum,i,false)}${input("НДС по строке","vat",row.vat,i,false)}</div></details>
       ${s.rows.length>1?`<button class="link" type="button" data-a="ocrdel" data-i="${i}">Убрать строку</button>`:""}
     </fieldset>`).join("")}
     <button class="btn s" type="button" data-a="ocradd" ${s.rows.length>=100?"disabled":""}>Добавить строку</button>
-    ${input("Итог по документу с НДС","total",s.total)}
+    ${input(s.documentWarning?"Итог по документу":"Итог по документу с НДС","total",s.total)}
     <p class="muted" role="status">${esc(s.error||"")}</p>
     <button class="btn p">Подтвердить и сохранить</button>
     </form>
@@ -147,7 +248,7 @@ async function openOcr(item,state,mode){
   const result=await incomingRequest("/documents/"+item.id+(xml?"/edi":"/recognize"),{method:xml?"GET":"POST"});
   if(S!==state||S.mode!==mode||sheet?.t!=="receivingsources")return "Откройте документ в очереди для проверки.";
   sheet={t:"ocr",queueId:item.id,name:item.name,mode:result.mode,supplierInn:result.supplierInn||"",supplier:result.supplier||"",buyer:result.buyer||"",number:result.number||"",
-    date:result.date||"",total:result.total||"",documentWarning:result.documentWarning||"",detectedRows:result.rows?.length||0,rows:result.rows?.length?result.rows:[blankOcrRow()],
+    date:result.date||"",deliveryAddress:result.deliveryAddress||"",total:result.total||"",documentWarning:result.documentWarning||"",detectedRows:result.rows?.length||0,rows:result.rows?.length?result.rows:[blankOcrRow()],
     preview:(result.preview||[]).filter(data=>/^[a-z0-9+/=]+$/i.test(data)),ocrText:result.ocrText||""};
   render(true);
   return "Проверьте распознанную накладную.";
@@ -163,24 +264,30 @@ function confirmOcr(){
     const total=cents(readNumber(draft.total));
     let declaredRows=0;
     const sourceRows=draft.rows.map((r,i)=>{
-      const qty=readNumber(r.qty), net=readNumber(r.netPrice), vat=readNumber(r.vat), gross=readNumber(r.gross);
-      const sum=cents(readNumber(r.netSum)), estimated=cents(net*qty), tax=cents(vat), grossCents=cents(gross);
+      const qty=readNumber(r.qty), gross=readNumber(r.gross), grossCents=cents(gross);
+      const present=key=>String(r[key]??"").trim()!=="";
+      const net=readNumber(r.netPrice),vat=readNumber(r.vat),netSum=readNumber(r.netSum);
+      const sum=cents(netSum), estimated=cents(net*qty), tax=cents(vat);
       const unitRounding=Math.max(1,Math.ceil(qty*.5));
       if(!r.pos.trim()||!r.unit.trim()||!Number.isFinite(qty)||qty<=0||
-        ![sum,estimated,tax,grossCents].every(x=>Number.isSafeInteger(x)&&x>=0)||net<0||vat<0||gross<0||
-        Math.abs(sum-estimated)>unitRounding||sum+tax!==grossCents)
+        !Number.isSafeInteger(grossCents)||grossCents<0||
+        (present("netPrice")&&(!Number.isFinite(net)||net<0))||
+        (present("netSum")&&(!Number.isSafeInteger(sum)||sum<0||sum>grossCents))||
+        (present("vat")&&(!Number.isSafeInteger(tax)||tax<0||tax>grossCents))||
+        (present("netSum")&&present("netPrice")&&(!Number.isSafeInteger(estimated)||Math.abs(sum-estimated)>unitRounding))||
+        (present("netSum")&&present("vat")&&sum+tax!==grossCents))
         throw new Error(`Строка ${i+1}: проверьте товар, количество, цену, НДС и сумму.`);
       declaredRows+=grossCents;
       return {pos:r.pos.trim(),unit:r.unit.trim(),qty:String(qty),price:String(gross/qty),sum:String(gross),
         supplier:draft.supplier.trim(),date:draft.date,number:draft.number.trim(),
-        netPrice:net,vat,netSum:sum/100,sourceLine:i+1};
+        ...(present("netPrice")?{netPrice:net}:{}),...(present("vat")?{vat}:{}),...(present("netSum")?{netSum:sum/100}:{}),sourceLine:i+1};
     });
     if(!Number.isSafeInteger(total)||!Number.isSafeInteger(declaredRows)||declaredRows!==total)
-      throw new Error("Итог документа должен совпадать с суммой строк с НДС.");
+      throw new Error("Итог документа должен совпадать с суммой строк.");
     const rows=[...sourceRows,{pos:"Итого",sum:String(total/100)}];
     commitReceiving(()=>{
       const res=applyReceiving("invoice",{title:"Накладная · распознана и проверена",rows,metadata:[],
-        sourceDocumentId:draft.queueId,supplierInn:draft.supplierInn?.trim(),buyer:draft.buyer?.trim(),taxBasis:"gross"},{name:draft.name});
+        sourceDocumentId:draft.queueId,supplierInn:draft.supplierInn?.trim(),buyer:draft.buyer?.trim(),deliveryAddress:draft.deliveryAddress?.trim(),taxBasis:draft.documentWarning?"":"gross"},{name:draft.name});
       S.sec.receiving.docs={...S.sec.receiving.docs,invoice:{name:draft.name,res,local:true}};
     });
     sheet={t:"receivingsources"};
@@ -440,13 +547,20 @@ function matrixByPosition(){
   }
   return prices;
 }
+function invoiceAccountingRow(row){
+  const match=row.stockMatch;
+  if(!match)return row;
+  const qty=invoiceQuantityIn(row,match.unit),sum=readNumber(row.sum);
+  return qty>0&&Number.isFinite(sum)?{...row,pos:match.name,unit:match.unit,qty,price:sum/qty}:row;
+}
 function invoiceChecks(){
   const prices=matrixByPosition();
-  return S.data.invoices.flatMap(inv=>inv.rows.map((row,index)=>{
+  return S.data.invoices.flatMap(inv=>inv.rows.map((source,index)=>{
+    const row=invoiceAccountingRow(source);
     const candidate=prices.get(receiveKey(row.pos));
     const sameUnit=receiveUnit(row.unit)&&receiveUnit(row.unit)===receiveUnit(candidate?.unit);
     const sameSupplier=receiveKey(inv.supplier)&&receiveKey(inv.supplier)===receiveKey(candidate?.supplier);
-    const sameTaxBasis=!inv.taxBasis||inv.taxBasis===candidate?.taxBasis;
+    const sameTaxBasis=(inv.taxBasis||"")===(candidate?.taxBasis||"");
     const matrix=sameUnit&&sameSupplier&&sameTaxBasis&&num(candidate.price)>0&&num(row.price)>=0?candidate:null;
     const delta=matrix?(num(row.price)-num(matrix.price))/num(matrix.price)*100:null;
     return {inv,row,index,matrix,delta};

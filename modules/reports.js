@@ -75,7 +75,8 @@ function computeReport(key){
     for(const invoice of invoices){
       if(!invoice.date||parseDate(invoice.date)!==invoice.date||!receiveKey(invoice.supplier))continue;
       const month=invoice.date.slice(0,7);
-      for(const row of invoice.rows){
+      for(const source of invoice.rows){
+        const row=invoiceAccountingRow(source);
         const unit=receiveUnit(row.unit), price=readNumber(row.price);
         if(!receiveKey(row.pos)||!unit||!Number.isFinite(price)||price<=0)continue;
         const key=JSON.stringify([receiveKey(row.pos),receiveKey(invoice.supplier),unit,invoice.taxBasis||""]);

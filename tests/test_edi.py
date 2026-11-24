@@ -37,6 +37,11 @@ class EdiDraftTest(unittest.TestCase):
         with self.assertRaisesRegex(EdiError, "643"):
             parse_edi(foreign_invoice.encode())
 
+    def test_only_explicit_consignee_address(self):
+        self.assertEqual(parse_edi(TEST_INVOICE.encode())["deliveryAddress"], "")
+        xml=TEST_INVOICE.replace('</СвСчФакт>','<ГрузПолуч><Адрес><АдрИнф АдрТекст="Москва, ул. Тестовая, 7"/></Адрес></ГрузПолуч></СвСчФакт>')
+        self.assertEqual(parse_edi(xml.encode())["deliveryAddress"], "Москва, ул. Тестовая, 7")
+
 
 if __name__ == "__main__":
     unittest.main()

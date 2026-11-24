@@ -110,7 +110,9 @@ const H={
  price:["цена","price","стоимость за"],
  sum:["сумма","итого","total","стоимость","выручка"],
  unit:["ед изм","единица","единица измерения","единицы","ед"],
- supplier:["поставщик","контрагент","vendor"],
+ supplier:["поставщик","продавец","контрагент","vendor"],
+ buyer:["покупатель"],
+ deliveryAddress:["адрес поставки","адрес доставки","адрес грузополучателя","грузополучатель и его адрес"],
  reason:["причина","основание"],
  category:["категория","группа","раздел"],
  out:["выход","нетто","output"],
@@ -141,12 +143,27 @@ function parseDoc(rows,hint){
   }
   if(hi<0)return null;
   const C={};Object.keys(H).forEach(k=>C[k]=col(head,H[k]));
+  let taxBasis="";
+  if(hint==="invoice"){
+    const labels=head.map(normHeader);
+    const isTotal=h=>/^(?:сумма|стоимость|итого|всего)(?: |$)/.test(h)&&!/(?:^| )за (?:единицу|ед)(?: |$)/.test(h)&&!/^сумма (?:ндс|налога)(?: |$)/.test(h);
+    const isGross=h=>/(?:^| )(?:с (?:ндс|налогом|учетом (?:ндс|налога))|включая ндс)(?: |$)/.test(h);
+    const isNet=h=>/(?:^| )без (?:ндс|налога|учета (?:ндс|налога))(?: |$)/.test(h);
+    const gross=labels.findIndex(h=>isTotal(h)&&isGross(h));
+    if(gross>=0){C.sum=gross;taxBasis="gross";if(C.price>=0&&!isGross(labels[C.price]))C.price=-1;}
+    else{
+      if(C.sum>=0&&/^сумма (?:ндс|налога)(?: |$)/.test(labels[C.sum]))C.sum=labels.findIndex(isTotal);
+      if(C.sum>=0&&isNet(labels[C.sum]))taxBasis="net";
+    }
+    if(C.sum===C.price)C.sum=-1;
+    if(C.sum<0&&C.price>=0&&isNet(labels[C.price]))taxBasis="net";
+  }
   const body=rows.slice(hi+1);
   const get=(r,k)=>{const i=C[k];return i>=0?cellText(r?.[i]):"";};
   const out=body.map((r=[],index)=>({
     sourceLine:hi+2+index,
     pos:get(r,"pos"),book:get(r,"book"),fact:get(r,"fact"),qty:get(r,"qty"),price:get(r,"price"),
-    sum:get(r,"sum"),unit:get(r,"unit"),supplier:get(r,"supplier"),reason:get(r,"reason"),
+    sum:get(r,"sum"),unit:get(r,"unit"),supplier:get(r,"supplier"),buyer:get(r,"buyer"),deliveryAddress:get(r,"deliveryAddress"),reason:get(r,"reason"),
     category:get(r,"category"),out:get(r,"out"),gross:get(r,"gross"),date:get(r,"date"),number:get(r,"number")
   })).filter(r=>r.pos||r.reason||((hint==="invoice"||hint==="matrix")&&[r.qty,r.price,r.sum].some(Boolean)));
   const hAll=head.map(normHeader).join(" ");
@@ -155,14 +172,14 @@ function parseDoc(rows,hint){
   else if(C.gross>=0||/брутто|нетто|выход/.test(hAll))type="ttk";
   else if(/списан|бой|порч|акт о/.test(hAll))type="writeoff";
   else if(/продаж|выручк|реализац/.test(hAll)&&C.qty>=0)type="sales";
-  else if(C.price>=0&&C.qty>=0)type="invoice";
+  else if((C.price>=0||(hint==="invoice"&&C.sum>=0))&&C.qty>=0)type="invoice";
   else if(C.price>=0&&C.pos>=0&&hint==="matrix")type="matrix";
   else if(C.qty>=0)type="stock";
   else if(C.reason>=0&&C.sum>=0)type="writeoff";
   if(hint==="sales"&&type==="stock"&&C.sum>=0)type="sales";
   if(hint==="menu"&&type==="unknown"&&C.price>=0)type="ttk";
   if(!out.length)return null;
-  return {type,rows:out,head,metadata:rows.slice(0,hi),date:findDate(rows),title:DOC_TITLE[type]};
+  return {type,rows:out,head,metadata:rows.slice(0,hi),date:findDate(rows),title:DOC_TITLE[type],...(taxBasis?{taxBasis}:{})};
 }
 function parseDate(value){
   const s=cellText(value);
@@ -480,7 +497,7 @@ async function commitWorkbookPreview(){
 }
 function receiveMetadata(parsed,key){
   const values=parsed.rows.map(r=>r[key]).filter(Boolean);
-  for(const row of parsed.metadata){
+  for(const row of parsed.metadata||[]){
     const first=cellText(row[0]);
     const split=first.indexOf(":");
     const label=split>=0?first.slice(0,split):first;
@@ -501,6 +518,7 @@ function applyReceiving(doc,parsed,file){
   const res={doc_type:parsed.title,period:"",fits:true,summary:"",findings:[],missing:[]};
   const rows=[];
   const totals=[];
+  if(doc==="invoice"&&parsed.taxBasis==="net")throw new Error("В таблице есть только стоимость без НДС. Для закупочной цены загрузите полную стоимость позиции с НДС или оригинал УПД.");
   for(const r of parsed.rows){
     if(/^(?:итого|всего)(?: к оплате| по документу)?$/.test(receiveKey(r.pos))){
       if(doc==="invoice"&&r.sum)totals.push(readNumber(r.sum));
@@ -508,18 +526,22 @@ function applyReceiving(doc,parsed,file){
     }
     const price=readNumber(r.price);
     const label=r.pos?`«${r.pos}»`:`строка ${r.sourceLine}`;
-    if(!r.pos||!Number.isFinite(price)||price<0||(doc==="matrix"&&price===0)){
+    const hasPrice=String(r.price??"").trim()!=="";
+    if(!r.pos||(doc==="matrix"&&(!Number.isFinite(price)||price<=0))||(hasPrice&&(!Number.isFinite(price)||price<0))){
       throw new Error(`${label}: проверьте позицию и цену.`);
     }
     if(doc==="matrix"){rows.push({pos:r.pos,unit:r.unit,supplier:r.supplier,price});continue;}
     const qty=readNumber(r.qty);
-    const expected=cents(qty*price);
-    const sum=r.sum===""?expected:cents(readNumber(r.sum));
-    if(!Number.isFinite(qty)||qty<=0||!Number.isSafeInteger(expected)||!Number.isSafeInteger(sum)||Math.abs(sum-expected)>1){
+    const expected=hasPrice?cents(qty*price):null;
+    const hasSum=String(r.sum??"").trim()!=="";
+    const sum=hasSum?cents(readNumber(r.sum)):expected;
+    if(!Number.isFinite(qty)||qty<=0||!Number.isSafeInteger(sum)||sum<0||(hasPrice&&(!Number.isSafeInteger(expected)||Math.abs(sum-expected)>Math.max(1,Math.ceil(qty*.5))))){
       throw new Error(`${label}: проверьте количество и сумму. Сумма должна равняться количеству × цене.`);
     }
-    rows.push({pos:r.pos,unit:r.unit,qty,price,sum:sum/100,
-      ...(parsed.taxBasis?{vat:r.vat,netPrice:r.netPrice,netSum:r.netSum}:{})});
+    const line={pos:r.pos,unit:r.unit,qty,price:(sum/100)/qty,sum:sum/100,...(!hasSum?{calculatedSum:true}:{}),
+      ...(parsed.taxBasis?{vat:r.vat,netPrice:r.netPrice,netSum:r.netSum}:{})};
+    const pack=invoicePack(line);
+    rows.push(pack?{...line,pack}:line);
   }
   if(!rows.length)throw new Error("В файле нет строк с товарами.");
   if(doc==="matrix"){
@@ -530,6 +552,8 @@ function applyReceiving(doc,parsed,file){
   const date=receiveMetadata(parsed,"date");
   const supplier=receiveMetadata(parsed,"supplier");
   const number=receiveMetadata(parsed,"number");
+  const buyer=parsed.buyer||receiveMetadata(parsed,"buyer");
+  const deliveryAddress=parsed.deliveryAddress||receiveMetadata(parsed,"deliveryAddress");
   const total=rows.reduce((sum,row)=>sum+cents(row.sum),0);
   if(!Number.isSafeInteger(total))throw new Error("Сумма накладной слишком велика для точного расчёта.");
   const declared=totals.at(-1);
@@ -543,8 +567,9 @@ function applyReceiving(doc,parsed,file){
     &&(number||inv.number?receiveKey(number)===receiveKey(inv.number):signature===rowSignature(inv.rows)));
   if(duplicate)throw new Error("Такая накладная уже есть в реестре. Проверьте дату, номер и поставщика.");
   const invoice={id:uid(),supplierInn:parsed.supplierInn||"",src:"receiving.invoice",date,supplier,sum:total/100,rows,status:"получена",number,filename:file.name,
-    ...(parsed.buyer?{buyer:parsed.buyer}:{}),
-    ...(parsed.taxBasis?{taxBasis:parsed.taxBasis,sourceDocumentId:parsed.sourceDocumentId}:{})};
+    ...(buyer?{buyer}:{}),
+    ...(deliveryAddress?{deliveryAddress}:{}),
+    ...(parsed.taxBasis?{taxBasis:parsed.taxBasis}:{}),...(parsed.sourceDocumentId?{sourceDocumentId:parsed.sourceDocumentId}:{})};
   S.data.invoices=S.data.invoices.concat(invoice);
   const checks=invoiceChecks();
   refreshReceivingFindings(checks);

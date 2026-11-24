@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr import recognize, expanded_grid, resolve_grid_document, valid_inn, invoice_fields
+from ocr import recognize, expanded_grid, transport_grid, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address
 
 
 class ExpandedGridTest(unittest.TestCase):
@@ -43,6 +43,16 @@ class ExpandedGridTest(unittest.TestCase):
         self.assertEqual(result['number'],'АБ000123')
         self.assertEqual(result['date'],'2026-11-07')
 
+    def test_transport_table_without_vat_columns(self):
+        image=Image.new('RGB',(900,1260),'white');draw=ImageDraw.Draw(image)
+        for y in (283,326,337,357,376,396,424,434,445):draw.line((45,y,840,y),fill='black',width=2)
+        for x in (55,113,164,217,264,313,527,566,605,641,684,747,813,839):draw.line((x,337,x,424),fill='black',width=2)
+        words=[(344,301,12,'Наименование'),(274,301,12,'Цена'),(699,298,12,'Сумма'),(170,429,12,'Итого')]
+        result=transport_grid(image,words)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result[3]),5)
+        self.assertEqual(len(result[5]),5)
+
     @staticmethod
     def row(unit,*values):
         return {'unit':unit,'candidates':[[Decimal(v) for v in group] for group in values]}
@@ -59,9 +69,24 @@ class ExpandedGridTest(unittest.TestCase):
         row=self.row('бут',['2','4'],[],['100'],['20'],['120'])
         self.assertIsNone(resolve_grid_document([row],'120','100'))
 
+    def test_quantity_and_gross_without_tax_or_price(self):
+        a=self.row('бут',['3'],[],[],[],['120','150'])
+        b=self.row('бут',['2','4'],[],[],[],['200'])
+        self.assertEqual(resolve_grid_core([a,b],'320'),[(Decimal('3'),Decimal('120')),(None,Decimal('200'))])
+        self.assertIsNone(resolve_grid_core([a,b],'321'))
+        self.assertIsNone(resolve_grid_core([a,a],'270'))
+
     def test_invalid_inn_is_rejected(self):
         self.assertTrue(valid_inn('7707083893'))
         self.assertFalse(valid_inn('7707083894'))
+
+    def test_delivery_address_is_not_buyer_legal_address(self):
+        image=Image.new('RGB',(900,1260),'white')
+        words=[(90,150,12,'Грузополучатель'),(300,150,12,'123456,'),(390,150,12,'г. Москва,'),(470,150,12,'ул.'),(540,150,12,'Тестовая,'),(615,150,12,'д. 7'),(690,150,12,'(4)'),
+               (90,250,12,'Покупатель'),(300,250,12,'г. Москва,'),(430,250,12,'ул.'),(550,250,12,'Другая,'),(620,250,12,'д. 9')]
+        self.assertEqual(delivery_address(image,words),'123456, г. Москва, ул. Тестовая, д. 7')
+        self.assertEqual(delivery_address(image,words[7:]),'')
+        self.assertEqual(delivery_address(image,[(90,150,12,'Грузополучатель'),(300,150,12,'ул'),(400,150,12,'по'),(500,150,12,'ОКПО'),(600,150,12,'26')]),'')
 
 
 @unittest.skipUnless(shutil.which("tesseract"), "Требуется Tesseract")

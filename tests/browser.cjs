@@ -94,6 +94,11 @@ async function run() {
         await button(page,"Закрыть").click();
         await page.locator("#invoice-results summary").first().click();
         await expectText(page,"Покупатель · ООО Южный Бар · проверено");
+        await button(page,"Сопоставить со складом").click();
+        await page.getByLabel("Адрес поставки",{exact:true}).fill("Москва, ул. Тестовая, 1");
+        await button(page,"Сохранить сопоставление").click();
+        await page.locator("#invoice-results summary").first().click();
+        await expectText(page,"Адрес поставки · Москва, ул. Тестовая, 1");
         await page.getByRole("navigation").getByRole("button",{name:"Склад",exact:true}).click();
         await page.locator('[data-doc="rest"]').setInputFiles({name:"Остатки.csv",mimeType:"text/csv",
           buffer:Buffer.from("На дату: 20.11.2026\nПозиция;Остаток;Единица\nСироп;9;шт")});

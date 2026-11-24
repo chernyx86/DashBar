@@ -21,6 +21,7 @@ function sheetHtml(){
   if(s.t==="docsinboxRegistry")b=renderDocsInboxRegistry(s)+close;
   if(s.t==="workbook")b=previewUpload(s)+close;
   if(s.t==="ocr")b=renderOcr(s)+'<button class="btn" data-a="ocrback">К очереди</button>';
+  if(s.t==="mapinvoice")b=renderInvoiceMapping(s)+close;
   if(s.t==="receivingsources")b=receivingSources()+close;
   if(s.t==="help"){const h=HELP[s.k]||["Пояснение","Описание появится позже."]; b=`<h2>${h[0]}</h2><p>${h[1]}</p>${close}`;}
   if(s.t==="report"){
@@ -85,6 +86,7 @@ function sheetHtml(){
     const th=S.theme||"auto";
     b=`<h2>Профиль и настройки</h2><button class="btn s" data-a="survey">Ответы о баре</button>
      <label class="field">Название склада бара в учёте<input class="in" data-b="venue.stockName" value="${esc(S.venue.stockName)}" placeholder="Необязательно"></label>
+     <label class="field">Адрес поставки этого заведения<input class="in" data-b="venue.address" value="${esc(S.venue.address||"")}" placeholder="Город, улица, дом"></label>
      <div class="field">Тема<div class="pills">${[["auto","Как в системе"],["light","Светлая"],["dark","Тёмная"]].map(x=>`<button class="pill" data-a="settheme" data-v="${x[0]}" aria-pressed="${th===x[0]}">${x[1]}</button>`).join("")}</div></div>
      <label class="field">Время утренней сводки<input class="in" id="s-sum" type="time" data-b="set.summary" value="${esc(S.set.summary)}"></label>
      <div class="field">День заказа${pills("set.orderDay",["Пн","Вт","Ср","Чт","Пт","Сб","Вс"],S.set.orderDay)}</div>
@@ -174,6 +176,7 @@ const A={
  docsinboxmore:()=>{sheet.limit+=25;paintDocsInboxRows();},
  savedocsinbox:()=>saveDocsInboxRegistry(),
  postreceipt:d=>postReceipt(d.id),
+ mapinvoice:d=>{sheet={t:"mapinvoice",id:d.id};render(true);},
  ocrback:()=>{sheet={t:"receivingsources"};render(true);},
  ocradd:()=>{if(sheet?.t==="ocr"&&sheet.rows.length<100){sheet.rows.push(blankOcrRow());render(true);}},
  ocrdel:d=>{if(sheet?.t==="ocr"&&sheet.rows.length>1){sheet.rows.splice(Number(d.i),1);render(true);}},
@@ -365,6 +368,7 @@ app.addEventListener("input",ev=>{
   if(sheet?.t==="ocr"&&t.dataset.ocrKey){
     const target=t.dataset.ocrIndex===undefined?sheet:sheet.rows[Number(t.dataset.ocrIndex)];
     if(target)target[t.dataset.ocrKey]=t.value;
+    if(target&&t.dataset.ocrIndex!==undefined){const summary=document.getElementById("ocr-summary-"+t.dataset.ocrIndex);if(summary)summary.textContent=ocrRowSummary(target);}
   }
   if(t.dataset.docsinboxQuery!==undefined&&sheet?.t==="docsinboxRegistry"){sheet.query=t.value;sheet.limit=25;paintDocsInboxRows();}
   if(t.id==="invoice-search"){
@@ -405,6 +409,7 @@ app.addEventListener("change",ev=>{
 app.addEventListener("submit",ev=>{
   ev.preventDefault();
   if(ev.target.dataset.f==="confirmocr")return confirmOcr();
+  if(ev.target.dataset.f==="mapinvoice")return saveInvoiceMapping(ev.target);
   if(["directintake","connectintake","configureintake","importqueue","queuedexports"].includes(ev.target.dataset.f))return submitIncoming(ev.target);
   if(ev.target.dataset.f==="chat"){const el=document.getElementById("chat-in");const v=el.value.trim();if(v&&!chatBusy){draft="";sendChat(v,ev.target.elements?.external?.checked===true);}}
 });
