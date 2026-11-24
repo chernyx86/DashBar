@@ -101,11 +101,11 @@ function salesConsumption(stock=effectiveStock()){
 function inventoryWindow(start,end,warehouse){
   const openingDate=new Date(Date.parse(start)-86400000).toISOString().slice(0,10);
   const pick=date=>{
-    const sameDay=S.data.counts.filter(count=>count.date===date&&count.warehouse&&receiveKey(count.warehouse)===receiveKey(warehouse));
+    const sameDay=S.data.counts.filter(count=>count.date===date&&barWarehouse(count.warehouse));
     if(sameDay.length!==1)return {rows:new Map(),note:`На ${ruDate(date)} нужен один сохранённый пересчёт склада «${warehouse}».`};
     return {count:sameDay[0],rows:groupByPosition(sameDay[0].rows)};
   };
-  const receipts=S.data.receipts.filter(receipt=>receipt.date>=start&&receipt.date<=end&&receiveKey(receipt.warehouse)===receiveKey(warehouse));
+  const receipts=S.data.receipts.filter(receipt=>receipt.date>=start&&receipt.date<=end&&barWarehouse(receipt.warehouse));
   return {opening:pick(openingDate),closing:pick(end),received:groupByPosition(receipts.flatMap(receipt=>receipt.rows))};
 }
 
@@ -117,7 +117,7 @@ function inventoryNormReport(stock){
   const warehouse=S.sec.stock.docs.rest?.res?.snapshot?.warehouse||S.venue.stockName.trim()||"Бар";
   const {opening,closing,received}=inventoryWindow(period.start,period.end,warehouse);
   const reference=S.data.stockReference;
-  const endStock=reference?.snapshot?.date===period.end&&receiveKey(reference.snapshot.warehouse)===receiveKey(warehouse)?
+  const endStock=reference?.snapshot?.date===period.end&&barWarehouse(reference.snapshot.warehouse)?
     stockIndex(reference.stock):new Map();
   const amount=(qty,unit)=>Number.isFinite(qty)?`${fmt(qty,4)} ${unit}`:"—";
   const rows=[];
