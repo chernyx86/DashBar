@@ -41,20 +41,22 @@ function effectiveStock(asOf=""){
   }
   return stock;
 }
-function postReceipt(id){
-  const invoice=S.data.invoices.find(item=>String(item.id)===id);
-  if(!invoice||isDemo())return;
-  try{
+function prepareReceipt(invoice,automatic=false){
+    if(!invoice||isDemo())throw new Error("Приход доступен только для своего бара.");
     if(invoice.receiptAt||invoice.status==="проведена"||S.data.receipts.some(record=>record.invoiceId===invoice.id))
       throw new Error("Накладная уже проведена. Остаток сохранён без изменений.");
     if(!invoice.number||!invoice.supplier||!invoice.date||parseDate(invoice.date)!==invoice.date)
       throw new Error("Для прихода нужны поставщик, номер и дата накладной.");
     const address=String(S.venue.address||"").trim(),delivery=String(invoice.deliveryAddress||"").trim();
+    if(automatic&&(!address||!delivery||!addressKey(address)||addressKey(address)!==addressKey(delivery)))
+      throw new Error("Для автоматического прихода нужен совпадающий адрес заведения и грузополучателя.");
     if(Number(S.venue.points)>1&&(!address||!delivery))throw new Error("Для нескольких заведений укажите адрес этого бара в профиле и проверьте адрес накладной в сопоставлении.");
     if(address&&delivery&&addressKey(address)!==addressKey(delivery))throw new Error("Адрес накладной отличается от адреса этого бара. Сверьте адрес и исправьте распознанную строку в сопоставлении; на другой бар приход не проводится.");
     const date=invoice.date;
     if(date>todayISO())throw new Error("Накладную с будущей датой пока нельзя поставить на приход.");
     const from=S.sec.stock.docs.rest?.res?.snapshot?.date;
+    if(automatic&&!from&&!Object.values(S.data.stock).some(r=>r.countDate))
+      throw new Error("Для автоматического прихода загрузите датированные остатки или сохраните фактическую инвентаризацию.");
     if(Object.keys(S.data.stock).length&&!from&&!S.data.counts.some(c=>c.date))
       throw new Error("Загрузите датированный остаток бара перед приходом. Так можно исключить двойной учёт.");
     if(from&&date<=from)throw new Error("Дата накладной совпадает с датой учётных остатков или раньше неё. Проверьте приход в учёте.");
@@ -68,12 +70,15 @@ function postReceipt(id){
       const existing=index.get(key);
       if(!key||!unit||!Number.isFinite(qty)||qty<=0)throw new Error(`«${row.pos}»: проверьте количество и единицу.`);
       if(index.has(key)&&!existing)throw new Error(`«${row.pos}»: название неоднозначно. Сверьте позицию на складе.`);
+      if(automatic&&!existing)throw new Error(`«${row.pos}»: сопоставьте с существующей складской позицией.`);
       const targetUnit=existing?.unit||match?.unit||invoicePack(row)?.baseUnit||unit;
       if(match&&existing&&receiveUnit(match.unit)!==existing.unit)throw new Error(`«${row.pos}»: единица складской позиции изменилась. Сопоставьте заново.`);
       const converted=invoiceQuantityIn(row,targetUnit);
       if(converted===null||!Number.isFinite(converted)||converted<=0)throw new Error(`«${row.pos}»: не удалось пересчитать количество в ${targetUnit}. Сверьте фасовку.`);
       if(existing&&S.data.stock[existing.name]?.countDate>=date)
         throw new Error(`«${row.pos}»: приход может быть уже включён в пересчёт.`);
+      if(automatic&&!from&&!S.data.stock[existing.name]?.countDate)
+        throw new Error(`«${row.pos}»: нет подтверждённого начального остатка на дату.`);
       const name=existing?.name||match?.name||row.pos;
       if(!existing)newNames.add(name);
       index.set(key,{name,unit:targetUnit});
@@ -82,15 +87,25 @@ function postReceipt(id){
     if(!rows.length)throw new Error("В накладной нет товарных строк.");
     const warehouse=S.sec.stock.docs.rest?.res?.snapshot?.warehouse||S.venue.stockName.trim()||"Бар";
     const changes=rows.filter((r,i)=>r.pos!==invoice.rows[i].pos||r.unit!==receiveUnit(invoice.rows[i].unit)||r.qty!==invoice.rows[i].qty);
+    return {rows,warehouse,delivery,changes,newNames};
+}
+function recordReceipt(invoice,prepared,automatic=false){
+    const {rows,warehouse}=prepared,receiptAt=new Date().toISOString();
+    S.data.receipts=S.data.receipts.concat({invoiceId:invoice.id,date:invoice.date,warehouse,receiptAt,rows,...(automatic?{automatic:true}:{})});
+    S.data.invoices=S.data.invoices.map(item=>item.id===invoice.id?{...item,receiptAt,autoReceiptIssue:"",...(automatic?{automaticReceipt:true}:{}),rows:item.rows.map((source,i)=>{
+      const r=rows[i];return source.stockMatch||r.pos!==source.pos||r.unit!==receiveUnit(source.unit)||r.qty!==source.qty?
+        {...source,stockMatch:{name:r.pos,unit:r.unit}}:source;
+    })}:item);
+}
+function postReceipt(id){
+  const invoice=S.data.invoices.find(item=>String(item.id)===id);
+  if(!invoice||isDemo())return;
+  try{
+    const prepared=prepareReceipt(invoice),{rows,warehouse,delivery,changes,newNames}=prepared;
     const preview=changes.slice(0,6).map(r=>`${r.pos}: ${fmt(r.qty,4)} ${r.unit}`).join("\n");
     if(!confirm(`Поставить ${rows.length} строк накладной № ${invoice.number} на склад «${warehouse}» (${venueName()})?${delivery?"\nАдрес поставки: "+delivery:"\nАдрес поставки не указан."}${preview?"\nПосле пересчёта:\n"+preview+(changes.length>6?"\n… и другие позиции":""):""}${newNames.size?"\nНовых позиций: "+newNames.size+". Проверьте, не нужно ли сопоставить их с существующими.":""}\nПодтвердите, что все строки относятся к бару.`))return;
-    const receiptAt=new Date().toISOString();
     commitReceiving(()=>{
-      S.data.receipts=S.data.receipts.concat({invoiceId:invoice.id,date,warehouse,receiptAt,rows});
-      S.data.invoices=S.data.invoices.map(item=>item.id===invoice.id?{...item,receiptAt,rows:item.rows.map((source,i)=>{
-        const r=rows[i];return source.stockMatch||r.pos!==source.pos||r.unit!==receiveUnit(source.unit)||r.qty!==source.qty?
-          {...source,stockMatch:{name:r.pos,unit:r.unit}}:source;
-      })}:item);
+      recordReceipt(invoice,prepared);
       refreshReceivingFindings(invoiceChecks());
     });
     render(true);toast("Приход отражён на складе DashBar");
