@@ -119,11 +119,14 @@ async function run() {
         const downloaded = await backup;
         const json = await fs.readFile(await downloaded.path());
         assert.equal(JSON.parse(json).data.invoices[0].buyer,"ООО Южный Бар · проверено");
-        await page.getByLabel("Название склада бара в учёте").fill("Временный склад");
+        const deliveryAddress = page.getByLabel("Адрес поставки этого заведения");
+        const originalAddress = JSON.parse(json).venue.address || "";
+        await deliveryAddress.fill("Временный адрес для проверки восстановления");
+        assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("barmanager-proto-v2")).venue.address),"Временный адрес для проверки восстановления");
         await page.locator("[data-import]").setInputFiles({name:"Копия.json",mimeType:"application/json",buffer:json});
         await expectText(page,"Копия загружена");
         await page.reload();
-        assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("barmanager-proto-v2")).venue.stockName),"");
+        assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("barmanager-proto-v2")).venue.address || ""),originalAddress);
         assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("barmanager-proto-v2")).data.counts[0].rows[0].fact),0);
         assert.deepEqual(errors,[]);
         console.log(`PASS Chromium ${width}×${height}: вкладки, оригинал, OCR, покупатель, дата, JSON`);
