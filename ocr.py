@@ -811,6 +811,26 @@ def decimal_candidates(texts, money):
     return sorted(values)
 
 
+def reconcile_package_quantity(quantities, size_reads, piece_reads):
+    """Recover a lost quantity comma only with independent pack/piece evidence."""
+    sizes={}
+    for raw in size_reads:
+        for value in decimal_candidates([raw],False):
+            if 1<=value<=1000 and value==value.to_integral_value():sizes[value]=sizes.get(value,0)+1
+    if not sizes:return None
+    highest=max(sizes.values());best_sizes=[s for s,count in sizes.items() if count==highest]
+    if len(best_sizes)!=1:return None
+    # A visibly printed decimal separator is stronger evidence than an OCR
+    # integer which may have lost the comma (48,000 -> 48000).
+    explicit=[raw for raw in piece_reads if re.search(r'\d[,.]\d',raw)]
+    pieces=set(decimal_candidates(explicit or piece_reads,False))
+    options=set(quantities)
+    if explicit:
+        options|={q/1000 for q in quantities if q>=1000 and q==q.to_integral_value() and q%1000==0}
+    compatible={q for q in options if q>0 and q*best_sizes[0] in pieces}
+    return next(iter(compatible)) if len(compatible)==1 else None
+
+
 GRID_KEYS=('qty','netPrice','netSum','vat','gross')
 
 
@@ -1052,12 +1072,12 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
             # pieces column: printed price and net amount refer to packages.
             count_reads=[]
             for a,b in layout[7:9]:
-                cell=direct_grid_cell(gray,scale,(a,y,b,z))
-                count_reads.append(decimal_candidates([grid_text(cell,scratch,deadline,options,'number','eng',binary) for binary in (False,True)],False))
-            pack_sizes,piece_counts=count_reads
-            compatible=[q for q in choices[0] if q>0 and any(s>0 and s==s.to_integral_value() and q*s in piece_counts for s in pack_sizes)]
-            if len(compatible)==1:
-                choices[0]=compatible
+                crops=[grid_cell(gray,mask,scale,(a,y,b,z),short=False),direct_grid_cell(gray,scale,(a,y,b,z))]
+                count_reads.append([grid_text(cell,scratch,deadline,options,'number','eng',binary) for cell in crops for binary in (False,True)])
+            compatible=reconcile_package_quantity(choices[0],*count_reads)
+            if compatible is not None:
+                choices[0]=[compatible]
+                votes[0][compatible]=max(votes[0].values(),default=0)+1
                 if not unit:unit='уп'
         result.append(dict(pos=pos,unit=unit,candidates=choices,votes=votes))
     # Independent full-page OCR of the printed total, near the total label.
@@ -1317,6 +1337,15 @@ def delivery_address(image,words):
         street=re.search(r'(?<!\w)'+street_type+r'\s+([А-Яа-яЁё-]{2,})',line,re.I)
         if not street or street[1].casefold() in {'по','окпо','инн','кпп','адрес','получатель','грузополучатель','дом'}:
             street=re.search(r'(?<!\w)([А-Яа-яЁё-]{2,})\s+'+street_type+r'(?=\s*[,.;]?\s*(?:дом|д\.|№|\d))',line,re.I)
+        if not street:
+            # A scan may omit the tiny "ул." marker. Return only the
+            # explicitly printed postcode, city, street and house span;
+            # a bare house number or an unlabelled address is not enough.
+            literal=re.search(r'(?<!\d)(\d{6})[\s_,.]+(?:г\.?\s*)?([А-Яа-яЁё-]{2,})\s*(?:г\.?\s*)?[, ]+([А-Яа-яЁё-]{2,})\s+дом\s*(?:№\s*)?\d+',line,re.I)
+            if literal:
+                tail=re.split(r'\s*\(\d+[а-я]?\)\s*|\b(?:ИНН|КПП|ОКПО|плательщик|документ)\b',line[literal.start():],maxsplit=1,flags=re.I)[0].strip(' ,;')
+                if 8<=len(tail)<=250:candidates.append(tail.replace('_',' '))
+            continue
         if not street or not re.search(r'\d',line[street.start():]):
             continue
         if street[1].casefold() in {'по','окпо','инн','кпп','адрес','получатель','грузополучатель','дом'}:
