@@ -85,7 +85,7 @@ function sheetHtml(){
   if(s.t==="settings"){
     const th=S.theme||"auto";
     b=`<h2>Профиль и настройки</h2><button class="btn s" data-a="survey">Ответы о баре</button>
-     <label class="field">Название склада бара в учёте<input class="in" data-b="venue.stockName" value="${esc(S.venue.stockName)}" placeholder="Необязательно"></label>
+     <p class="muted">Склад определяется при загрузке остатков.</p>
      <label class="field">Адрес поставки этого заведения<input class="in" data-b="venue.address" value="${esc(S.venue.address||"")}" placeholder="Город, улица, дом"></label>
      <label class="field"><span><input type="checkbox" data-b="venue.autoReceipt" ${S.venue.autoReceipt!==false?"checked":""}> Автоматический приход на склад DashBar</span><span class="muted">Только при точном адресе, известной позиции, подтверждённом количестве и сверенной сумме. Не меняет iiko.</span></label>
      <div class="field">Тема<div class="pills">${[["auto","Как в системе"],["light","Светлая"],["dark","Тёмная"]].map(x=>`<button class="pill" data-a="settheme" data-v="${x[0]}" aria-pressed="${th===x[0]}">${x[1]}</button>`).join("")}</div></div>
