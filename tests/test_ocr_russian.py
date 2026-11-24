@@ -8,10 +8,16 @@ from time import monotonic
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr import recognize, expanded_grid, transport_grid, split_quantity_grid, extract_expanded_rows, tesseract_options, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address, validate_document_total
+from ocr import recognize, expanded_grid, transport_grid, split_quantity_grid, extract_expanded_rows, tesseract_options, reconcile_package_quantity, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address, validate_document_total
 
 
 class ExpandedGridTest(unittest.TestCase):
+    def test_quantity_comma_recovery_requires_independent_piece_count(self):
+        self.assertEqual(reconcile_package_quantity([Decimal('4000')],['12','12','2','14'],['48000','48,00','45,00']),Decimal('4'))
+        self.assertIsNone(reconcile_package_quantity([Decimal('4000')],['12','12'],['45,00']))
+        self.assertEqual(reconcile_package_quantity([Decimal('4000')],['12','12'],['48000']),Decimal('4000'))
+        self.assertIsNone(reconcile_package_quantity([Decimal('4000')],['12','14'],['48,00']))
+
     def test_landscape_upd_with_three_quantity_columns(self):
         image=Image.new('RGB',(900,600),'white')
         draw=ImageDraw.Draw(image)
@@ -115,6 +121,8 @@ class ExpandedGridTest(unittest.TestCase):
         self.assertEqual(delivery_address(image,[(90,150,12,'Грузополучатель'),(300,150,12,'ул'),(400,150,12,'по'),(500,150,12,'ОКПО'),(600,150,12,'26')]),'')
         reverse=[(90,150,12,'Грузополучатель'),(300,150,12,'127051,'),(390,150,12,'г. Москва,'),(470,150,12,'Петровка'),(540,150,12,'ул.'),(615,150,12,'дом № 26'),(690,150,12,'стр. 3')]
         self.assertEqual(delivery_address(image,reverse),'127051, г. Москва, Петровка ул. дом № 26 стр. 3')
+        omitted=[(90,150,12,'Грузополучатель'),(300,150,12,'127051_Москва'),(390,150,12,'г.'),(470,150,12,'Петровка'),(540,150,12,'дом'),(615,150,12,'26')]
+        self.assertEqual(delivery_address(image,omitted),'127051 Москва г. Петровка дом 26')
 
 
 @unittest.skipUnless(shutil.which("tesseract"), "Требуется Tesseract")
