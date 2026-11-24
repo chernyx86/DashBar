@@ -87,6 +87,7 @@ function sheetHtml(){
     b=`<h2>Профиль и настройки</h2><button class="btn s" data-a="survey">Ответы о баре</button>
      <label class="field">Название склада бара в учёте<input class="in" data-b="venue.stockName" value="${esc(S.venue.stockName)}" placeholder="Необязательно"></label>
      <label class="field">Адрес поставки этого заведения<input class="in" data-b="venue.address" value="${esc(S.venue.address||"")}" placeholder="Город, улица, дом"></label>
+     <label class="field"><span><input type="checkbox" data-b="venue.autoReceipt" ${S.venue.autoReceipt!==false?"checked":""}> Автоматический приход на склад DashBar</span><span class="muted">Только при точном адресе, известной позиции, подтверждённом количестве и сверенной сумме. Не меняет iiko.</span></label>
      <div class="field">Тема<div class="pills">${[["auto","Как в системе"],["light","Светлая"],["dark","Тёмная"]].map(x=>`<button class="pill" data-a="settheme" data-v="${x[0]}" aria-pressed="${th===x[0]}">${x[1]}</button>`).join("")}</div></div>
      <label class="field">Время утренней сводки<input class="in" id="s-sum" type="time" data-b="set.summary" value="${esc(S.set.summary)}"></label>
      <div class="field">День заказа${pills("set.orderDay",["Пн","Вт","Ср","Чт","Пт","Сб","Вс"],S.set.orderDay)}</div>
@@ -180,6 +181,8 @@ const A={
  ocrback:()=>{sheet={t:"receivingsources"};render(true);},
  ocradd:()=>{if(sheet?.t==="ocr"&&sheet.rows.length<100){sheet.rows.push(blankOcrRow());render(true);}},
  ocrdel:d=>{if(sheet?.t==="ocr"&&sheet.rows.length>1){sheet.rows.splice(Number(d.i),1);render(true);}},
+ ocrcatalog:d=>selectOcrCatalog(Number(d.i),Number(d.j)),
+ ocrcatalogclear:d=>{if(sheet?.t==="ocr"&&sheet.rows[Number(d.i)]){delete sheet.rows[Number(d.i)].stockMatch;render(true);}},
  invoicemore:()=>{invoiceSearch.limit+=25;paintInvoiceResults();},
  queuemore:()=>runIncoming(async()=>{
    if(incoming.nextCursor)await refreshIncoming(true);
@@ -360,7 +363,7 @@ app.addEventListener("keydown",ev=>{
 });
 app.addEventListener("input",ev=>{
   const t=ev.target;
-  if(t.dataset.b){setPath(t.dataset.b,t.type==="number"?num(t.value):t.value);save();}
+  if(t.dataset.b){setPath(t.dataset.b,t.type==="checkbox"?t.checked:t.type==="number"?num(t.value):t.value);save();}
   if(t.dataset.ord!==undefined){S.order[Number(t.dataset.ord)].qty=t.value;save();}
   if(t.dataset.inv!==undefined){S.draft.rows[t.dataset.inv]=t.value;save();updInvCount();}
   if(t.dataset.invd!==undefined){S.draft.date=t.value;save();}
@@ -369,6 +372,14 @@ app.addEventListener("input",ev=>{
     const target=t.dataset.ocrIndex===undefined?sheet:sheet.rows[Number(t.dataset.ocrIndex)];
     if(target)target[t.dataset.ocrKey]=t.value;
     if(target&&t.dataset.ocrIndex!==undefined){const summary=document.getElementById("ocr-summary-"+t.dataset.ocrIndex);if(summary)summary.textContent=ocrRowSummary(target);}
+    if(target&&t.dataset.ocrKey==="pos"&&t.dataset.ocrIndex!==undefined){
+      delete target.stockMatch;
+      const hint=document.getElementById("ocr-catalog-"+t.dataset.ocrIndex);
+      if(hint)hint.innerHTML=ocrCatalogHints(sheet,target,Number(t.dataset.ocrIndex),invoiceCatalog());
+    }
+    if(["supplier","supplierInn"].includes(t.dataset.ocrKey)&&t.dataset.ocrIndex===undefined){
+      const catalog=invoiceCatalog();sheet.rows.forEach((row,i)=>{delete row.stockMatch;const hint=document.getElementById("ocr-catalog-"+i);if(hint)hint.innerHTML=ocrCatalogHints(sheet,row,i,catalog);});
+    }
   }
   if(t.dataset.docsinboxQuery!==undefined&&sheet?.t==="docsinboxRegistry"){sheet.query=t.value;sheet.limit=25;paintDocsInboxRows();}
   if(t.id==="invoice-search"){
