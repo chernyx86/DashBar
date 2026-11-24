@@ -540,6 +540,11 @@ function applyReceiving(doc,parsed,file){
     }
     const line={pos:r.pos,unit:r.unit,qty,price:(sum/100)/qty,sum:sum/100,...(!hasSum?{calculatedSum:true}:{}),
       ...(parsed.taxBasis?{vat:r.vat,netPrice:r.netPrice,netSum:r.netSum}:{})};
+    if(r.stockMatch){
+      const match=invoiceCatalog().find(item=>item.name===r.stockMatch.name&&item.unit===r.stockMatch.unit);
+      if(!match||invoiceQuantityIn(line,match.unit)===null)throw new Error(`${label}: проверьте сопоставление и фасовку.`);
+      line.stockMatch={name:match.name,unit:match.unit};
+    }
     const pack=invoicePack(line);
     rows.push(pack?{...line,pack}:line);
   }
@@ -569,12 +574,26 @@ function applyReceiving(doc,parsed,file){
   const invoice={id:uid(),supplierInn:parsed.supplierInn||"",src:"receiving.invoice",date,supplier,sum:total/100,rows,status:"получена",number,filename:file.name,
     ...(buyer?{buyer}:{}),
     ...(deliveryAddress?{deliveryAddress}:{}),
-    ...(parsed.taxBasis?{taxBasis:parsed.taxBasis}:{}),...(parsed.sourceDocumentId?{sourceDocumentId:parsed.sourceDocumentId}:{})};
+    ...(parsed.taxBasis?{taxBasis:parsed.taxBasis}:{}),...(parsed.sourceDocumentId?{sourceDocumentId:parsed.sourceDocumentId}:{}),
+    ...(parsed.taxBasis==="gross"&&Number.isFinite(declared)&&cents(declared)===total&&!rows.some(r=>r.calculatedSum)?{totalVerified:true}:{})};
   S.data.invoices=S.data.invoices.concat(invoice);
+  let automaticReceipt=false;
+  if(S.venue.autoReceipt!==false&&!isDemo()){
+    try{
+      if(!invoice.totalVerified)
+        throw new Error("Для автоматического прихода требуется сверенный итог и суммы строк с НДС.");
+      const prepared=prepareReceipt(invoice,true);
+      recordReceipt(invoice,prepared,true);automaticReceipt=true;
+    }catch(error){
+      if(parsed.automaticOnly)throw error;
+      invoice.autoReceiptIssue=error.message;
+    }
+  }else if(parsed.automaticOnly)throw new Error("Автоматический приход отключён.");
   const checks=invoiceChecks();
   refreshReceivingFindings(checks);
   res.period=date?ruDate(date):"";
-  res.summary=`В реестре сохранено ${rows.length} строк на ${exactMoney(invoice.sum)}.`;
+  res.summary=`В реестре сохранено ${rows.length} строк на ${exactMoney(invoice.sum)}.${automaticReceipt?" Приход автоматически отражён на складе DashBar.":""}`;
+  res.automaticReceipt=automaticReceipt;
 
   return res;
 }
