@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr import recognize, expanded_grid, transport_grid, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address
+from ocr import recognize, expanded_grid, transport_grid, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address, validate_document_total
 
 
 class ExpandedGridTest(unittest.TestCase):
@@ -75,6 +75,13 @@ class ExpandedGridTest(unittest.TestCase):
         self.assertEqual(resolve_grid_core([a,b],'320'),[(Decimal('3'),Decimal('120')),(None,Decimal('200'))])
         self.assertIsNone(resolve_grid_core([a,b],'321'))
         self.assertIsNone(resolve_grid_core([a,a],'270'))
+
+    def test_document_total_is_hidden_when_lines_do_not_reconcile(self):
+        rows=[{'gross':'120.00','needsReview':False},{'gross':'200.00','needsReview':False}]
+        self.assertEqual(validate_document_total(rows,'320'), '320')
+        self.assertEqual(validate_document_total(rows,'321'), '')
+        self.assertTrue(all(row['needsReview'] for row in rows))
+        self.assertEqual(validate_document_total([{'gross':''}],'320'), '')
 
     def test_invalid_inn_is_rejected(self):
         self.assertTrue(valid_inn('7707083893'))

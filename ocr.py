@@ -233,6 +233,26 @@ def profile_peaks(values, offset, threshold):
     return [max(group, key=lambda pair: pair[1])[0] for group in groups]
 
 
+def ruled_column_edges(mask, top, bottom):
+    """Return sustained vertical table rules, excluding isolated OCR glyphs."""
+    top=max(0,round(top));bottom=min(mask.height,round(bottom))
+    if bottom-top<12:return []
+    scores=[]
+    step=max(3,min(8,(bottom-top)//12))
+    for x in range(15,mask.width-15):
+        hits=checks=0
+        for y in range(top,bottom,step):
+            checks+=1
+            if mask.crop((x-1,y,min(mask.width,x+2),min(bottom,y+step))).getbbox():hits+=1
+        if checks and hits/checks>=.72:scores.append(x)
+    groups=[]
+    for x in scores:
+        if not groups or x>groups[-1][-1]+2:groups.append([])
+        groups[-1].append(x)
+    # A printed rule is narrow; broad connected regions tend to be text.
+    return [round((group[0]+group[-1])/2) for group in groups if len(group)<=9]
+
+
 def expanded_grid(image, words):
     """Recognize the expanded UPD layout only when both headers and grid agree."""
     w, h = image.size
@@ -356,8 +376,58 @@ def standard_upd_grid(image, words):
             if len(chain) >= 3:
                 chains.append(chain)
         if not chains:
-            return None
-        boundaries = max(chains, key=lambda seq: (len(seq), seq[-1] - seq[0]))
+            # Sideways phone scans sometimes erase the fine horizontal rules,
+            # while Tesseract still locates the numeric cells. In that case
+            # recover row bands from repeated aligned numeric baselines.
+            left_totals=[y/scale for x,y,_,token in words
+                         if x/scale<400 and y/scale>name_y/scale+24
+                         and re.sub(r"\W","",token.casefold()).translate(OCR_TOTAL_LABEL) in {"всего","итого"}]
+            row_limit=min(small.height*.78,min(left_totals)-3) if left_totals else small.height*.78
+            numeric=[]
+            for x,y,h,token in words:
+                xn,yn=x/scale,y/scale
+                if (xn<250 or xn>760 or yn<name_y/scale+24 or yn>row_limit
+                        or not re.fullmatch(r"\d[\d.,]*[)\]]?",token.strip())):
+                    continue
+                numeric.append(yn)
+            groups=[]
+            for y in sorted(numeric):
+                if not groups or y-groups[-1][-1]>5:groups.append([])
+                groups[-1].append(y)
+            centers=[sum(group)/len(group) for group in groups if len(group)>=3]
+            if not centers or len(centers)>MAX_ROWS:
+                return None
+            if len(centers)==1:
+                boundaries=[max(name_y/scale+12,centers[0]-10),centers[0]+10]
+            else:
+                boundaries=[centers[0]-(centers[1]-centers[0])/2]
+                boundaries.extend((a+b)/2 for a,b in zip(centers,centers[1:]))
+                boundaries.append(centers[-1]+(centers[-1]-centers[-2])/2)
+            boundaries=[round(y) for y in boundaries]
+        else:
+            boundaries = max(chains, key=lambda seq: (len(seq), seq[-1] - seq[0]))
+        # Prefer the numeric baselines to horizontal rules when they agree
+        # on the repeated item rows. This keeps header/footer rules out of the
+        # item sequence on narrow or perspective-skewed phone scans.
+        low_row=name_y/scale+24
+        row_totals=[y/scale for x,y,_,token in words
+                    if x/scale<400 and y/scale>low_row
+                    and re.sub(r"\W","",token.casefold()).translate(OCR_TOTAL_LABEL) in {"всего","итого"}]
+        row_limit=min(small.height*.78,min(row_totals)-3) if row_totals else min(small.height*.78,boundaries[-1]+12)
+        values=[]
+        for x,y,h,token in words:
+            yn=y/scale;xn=x/scale
+            if 250<=xn<=700 and low_row<yn<row_limit and re.fullmatch(r"\d[\d.,]*[)\]]?",token.strip()):
+                values.append(yn)
+        groups=[]
+        for y in sorted(values):
+            if not groups or y-groups[-1][-1]>5:groups.append([])
+            groups[-1].append(y)
+        centers=[sum(group)/len(group) for group in groups if len(group)>=3]
+        if 2<=len(centers)<=MAX_ROWS:
+            boundaries=[centers[0]-(centers[1]-centers[0])/2]
+            boundaries.extend((a+b)/2 for a,b in zip(centers,centers[1:]))
+            boundaries.append(centers[-1]+(centers[-1]-centers[-2])/2)
         # Remove any leftover duplicate header strokes.
         clean = [boundaries[0]]
         for line in boundaries[1:]:
@@ -366,25 +436,64 @@ def standard_upd_grid(image, words):
             else:
                 clean[-1] = line
         boundaries = clean
-        if not 3 <= len(boundaries) <= MAX_ROWS + 1:
+        # A few Russian UPD scans include only the first item rows in the OCR
+        # baseline sequence. Recover any additional rows from the ruled table
+        # itself, even when the partial baseline boundaries look regular.
+        # The profile may report both dark edges of a rule (for example 305
+        # and 310), so collapse those hits before searching for a row run.
+        floor=name_y/scale+50
+        eligible=[]
+        for line in rules:
+            if line<=floor or line>small.height*.78:
+                continue
+            if eligible and line-eligible[-1]<=10:
+                eligible[-1]=round((eligible[-1]+line)/2)
+            else:
+                eligible.append(line)
+        candidates=[]
+        for start in range(len(eligible)):
+            chain=[eligible[start]]
+            for line in eligible[start+1:]:
+                gap=line-chain[-1]
+                if gap<12:break
+                if gap>32:break
+                chain.append(line)
+            if len(chain)>=4:candidates.append(chain)
+        if candidates:
+            ruled=max(candidates,key=lambda seq:(len(seq),-max(seq[i+1]-seq[i] for i in range(len(seq)-1))))
+            if len(ruled)>len(boundaries):
+                boundaries=ruled
+        if not 2 <= len(boundaries) <= MAX_ROWS + 1:
             return None
 
         # Locate numeric columns from the printed UPD header words. The
         # rightmost "всего" belongs to amount including VAT; the nearest
         # "цена" anchors unit price, and the immediately preceding ruled band
         # is quantity. These are page-relative, so vendor-specific widths work.
-        price_hits = [(x / scale, y / scale) for x, y, _, token in words
+        price_hits = [(x / scale + len(token) * h / scale * .38, y / scale)
+                      for x, y, h, token in words
                       if re.sub(r"\W", "", token.casefold()) in {"цена", "тариф"}
                       and y > height * .28 and y < height * .58]
         total_hits = [(x / scale, y / scale) for x, y, _, token in words
                       if re.sub(r"\W", "", token.casefold()).translate(OCR_TOTAL_LABEL) == "всего"
                       and y > height * .28 and y < height * .62]
-        if not price_hits or not total_hits:
+        if not total_hits:
             return None
-        price_x = min(price_hits, key=lambda p: abs(p[1] - name_y))[0]
-        gross_x = max(x for x, _ in total_hits)
-        vertical = column_profile(mask, (20, boundaries[0] - 4, 880, boundaries[-1] + 4), True)
-        x_rules = profile_peaks(vertical, 0, 35)
+        # `price_hits` are normalized to the 900px page while `name_y` is a
+        # coordinate from the original scan. Compare in the same coordinate
+        # system; otherwise a noisy header word can anchor the price cell to
+        # the wrong vertical rule on landscape scans.
+        price_x = min(price_hits, key=lambda p: abs(p[1] - name_y / scale))[0] if price_hits else None
+        amount_headers=[(x/scale + len(token)*h/scale*.38,y/scale)
+                        for x,y,h,token in words
+                        if re.sub(r"\W","",token.casefold()).startswith("стоим")
+                        and height*.28<y<height*.62]
+        gross_x = (max(x for x,_ in total_hits) if price_hits else
+                   max((x for x,_ in amount_headers if x<720),default=max(x for x,_ in total_hits)))
+        # Include the table header: some printed templates omit a faint
+        # vertical rule inside the item rows but draw it clearly through the
+        # multi-line header.
+        x_rules = ruled_column_edges(mask, max(0, round(name_y / scale) - 28), boundaries[-1] + 4)
         x_rules = [x for x in x_rules if 30 <= x <= 880]
 
         def nearest_left(x):
@@ -395,14 +504,45 @@ def standard_upd_grid(image, words):
             values = [v for v in x_rules if v > x]
             return min(values) if values else None
 
-        price_left, price_right = nearest_left(price_x), nearest_right(price_x)
-        gross_left, gross_right = nearest_left(gross_x), nearest_right(gross_x)
+        def cell_at(x, min_width, max_width):
+            pairs=[(a,b) for a,b in zip(x_rules,x_rules[1:])
+                   if a < x < b and min_width <= b-a <= max_width]
+            return min(pairs,key=lambda pair:abs((pair[0]+pair[1])/2-x)) if pairs else None
+
+        if price_x is not None:
+            price_pair=cell_at(price_x,24,90)
+        else:
+            price_pair=None
+        # Some standard UPDs split the quantity header into package count and
+        # physical piece count and OCR misses the word "цена". In that layout
+        # the price column is immediately left of the first net amount column.
+        net_labels=[x / scale + len(token) * h / scale * .38
+                    for x,y,h,token in words
+                    if re.sub(r"\W", "", token.casefold()).startswith("стоим")
+                    and y > height*.28 and y < height*.62 and x/scale < gross_x]
+        net_pair=cell_at(min(net_labels),35,100) if net_labels else None
+        if price_pair is None and net_pair:
+            previous=[a for a,b in zip(x_rules,x_rules[1:]) if b==net_pair[0]]
+            price_pair=(max(previous),net_pair[0]) if previous else None
+        gross_pair=cell_at(gross_x,35,100)
+        if gross_pair is None and net_pair:
+            # Keep the gross field bounded by the final value column, not by
+            # a stray vertical stroke in the country/declaration columns.
+            likely=[(a,b) for a,b in zip(x_rules,x_rules[1:])
+                    if b>a and 35<=b-a<=100 and a>=net_pair[1]]
+            gross_pair=min(likely,key=lambda pair:abs(pair[1]-gross_x)) if likely else None
+        price_left,price_right=price_pair if price_pair else (None,None)
+        gross_left,gross_right=gross_pair if gross_pair else (None,None)
         name_x_scaled = name_x / scale
-        name_left, name_right = nearest_left(name_x_scaled), nearest_right(name_x_scaled)
+        name_pair=cell_at(name_x_scaled,45,180)
+        name_left,name_right=name_pair if name_pair else (nearest_left(name_x_scaled),nearest_right(name_x_scaled))
         if not all(v is not None for v in (price_left, price_right, gross_left, gross_right,
                                             name_left, name_right)):
             return None
-        qty_left = nearest_left(price_left - 1)
+        qty_choices=[(a,b) for a,b in zip(x_rules,x_rules[1:])
+                     if b==price_left and 12<=b-a<=80]
+        qty_pair=qty_choices[-1] if qty_choices else None
+        qty_left=qty_pair[0] if qty_pair else nearest_left(price_left-1)
         if qty_left is None or price_left - qty_left < 8:
             return None
         # In this UPD family the two columns immediately before price are the
@@ -811,7 +951,7 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
             pos=re.sub(r'(\b(?:бутылка|упаковка)\s+)\d+[,.]\d+(?:\s*[%°×*]\s*\d+)?',
                        lambda m:m[1]+printed_pack[1]+'*'+printed_pack[2],pos,flags=re.I)
         units={grid_text(cells[1],scratch,deadline,options,'unit',lang,binary).casefold().strip(' .|')
-               for lang,binary in (('rus',True),('rus',False),('rus+eng',False))}
+               for lang,binary in (('rus',True),('rus+eng',False))}
         a,b=columns[1]
         units.update(re.sub(r'[^а-я]','',t.casefold()) for x,yy,_,t in words
                      if (a-3)/900*image.width<=x<(b+3)/900*image.width
@@ -820,15 +960,15 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
         unit=units.pop() if len(units)==1 else ''
         choices=[];votes=[]
         for i,cell in enumerate(cells[2:]):
-            reads=[grid_text(cell,scratch,deadline,options,'number',lang,binary,psm)
-                   for lang,binary,psm in (('eng',True,7),('rus',True,7),('eng',False,7),('eng',True,8))]
+            # Keep the per-row OCR budget bounded. The source words pass and
+            # the high-resolution cell each provide an independent reading;
+            # running four full Tesseract variants for every numeric column
+            # made multi-line invoices time out before the last rows.
+            reads=[grid_text(cell,scratch,deadline,options,'number',lang,binary,7)
+                   for lang,binary in (('eng',True),('eng',False))]
             a,b=columns[i+2]
             raw_y=(y+5)/mask.height*image.height
             reads.append(number_in_column(words,raw_y,image.width*.013,(a-3)/900*image.width,(b+3)/900*image.width))
-            if high_image is not None:
-                direct = direct_grid_cell(high_image, scale, (a, y, b, z))
-                reads.extend(grid_text(direct,scratch,deadline,options,'number',lang,binary,7)
-                             for lang,binary in (('eng',False),('eng',True)))
             choices.append(decimal_candidates(reads,i>0))
             counts={}
             for raw in reads:
@@ -864,13 +1004,20 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
             row['calculatedFields']=list(derived)
             row['rounding']=values[0]*values[1]!=values[2]
         else:
-            # Without a unique consistent set, leave disputed financial fields
-            # blank; the product and unit remain visible for review.
+            # Preserve independently read quantity and line total even when
+            # the document has no readable grand total. The receiving screen
+            # derives unit price as line total / quantity and requires the
+            # operator to reconcile the final invoice total before saving.
             row.update(zip(GRID_KEYS,('' for _ in GRID_KEYS)))
             if basic:
                 qty,gross=basic[i]
                 row['qty']=format(qty,'f') if qty is not None else ''
                 row['gross']=format(gross,'f')
+            else:
+                qtys=candidates[0]
+                grosses=candidates[-1]
+                if len(qtys)==1:row['qty']=format(next(iter(qtys)),'f')
+                if len(grosses)==1:row['gross']=format(next(iter(grosses)),'f')
         row['needsReview']=True
     return result,total
 
@@ -1139,6 +1286,24 @@ def complete_gross_amounts(rows, total):
         row["calculatedGross"] = True
 
 
+def validate_document_total(rows, total):
+    """Keep a document total only when every extracted line reconciles to it."""
+    if not rows or not total:
+        return total
+    try:
+        if any(not row.get("gross") for row in rows):
+            return ""
+        declared=Decimal(total).quantize(Decimal(".01"))
+        summed=sum((Decimal(row["gross"]).quantize(Decimal(".01")) for row in rows),Decimal(0))
+    except (InvalidOperation, ValueError):
+        return ""
+    if declared!=summed:
+        for row in rows:
+            row["needsReview"]=True
+        return ""
+    return total
+
+
 def recognize(name, data):
     if not shutil.which("tesseract"):
         raise RecognitionError("На сервере нужно установить Tesseract с русским языком.")
@@ -1192,6 +1357,7 @@ def recognize(name, data):
                 image.save(output,format="JPEG",quality=72)
                 previews.append(base64.b64encode(output.getvalue()).decode("ascii"))
         complete_gross_amounts(all_rows,total)
+        total=validate_document_total(all_rows,total)
         text="\n\n".join(all_text)
         warning=""
         if re.search(r'товарно\s*[-–—]?\s*транспортная\s+накладная',text,re.I):
