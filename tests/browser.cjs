@@ -42,6 +42,7 @@ async function startServer(dir) {
 async function run() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dashbar-qa-"));
   const launch = {};
+  if (process.env.DASHBAR_CHROMIUM_EXECUTABLE) launch.executablePath = process.env.DASHBAR_CHROMIUM_EXECUTABLE;
   if (process.env.DASHBAR_CHROMIUM_ADAPTER) {
     const {default: engine} = await import(process.env.DASHBAR_CHROMIUM_ADAPTER);
     launch.executablePath = await engine.executablePath();
@@ -83,6 +84,8 @@ async function run() {
         assert.deepEqual(await fs.readFile(await (await original).path()), image);
         await button(page,"Распознать").click();
         await page.getByRole("heading",{name:"Проверить накладную"}).waitFor();
+        await expectText(page,"Строк распознано: 2");
+        assert.equal(await page.getByText("Изображение документа",{exact:true}).locator("xpath=..").getAttribute("open"),null);
         const buyer = page.getByLabel("Покупатель",{exact:true});
         assert.equal(await buyer.inputValue(), "ООО Южный Бар");
         await buyer.fill("ООО Южный Бар · проверено");

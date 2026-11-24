@@ -109,21 +109,26 @@ function blankOcrRow(){return {pos:"",unit:"",qty:"",netPrice:"",netSum:"",vat:"
 function renderOcr(s){
   const input=(label,key,value,index,required=true)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
     ${["qty","netPrice","netSum","vat","gross","total"].includes(key)?'inputmode="decimal"':key==="date"?'type="date"':""} value="${esc(value)}" ${required?"required":""}></label>`;
+  const calculatedLabels={qty:"количество",netPrice:"цена",netSum:"сумма без НДС",vat:"НДС",gross:"сумма с НДС"};
+  const pending=s.rows.filter(row=>row.needsReview||!row.pos||!row.unit||["qty","netPrice","netSum","vat","gross"].some(key=>row[key]==="" )).length;
   return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":"распознано на сервере DashBar"}</p>
     <p>Сверьте поставщика, покупателя, дату, фасовку, количество, цену, НДС и итог с оригиналом. Все поля можно исправить.</p>
+    <div class="res" role="status"><b>Строк распознано: ${s.detectedRows}</b><span>${pending?`Нужно проверить: ${pending}.`:"Сверьте данные с оригиналом перед сохранением."}</span></div>
+    ${s.documentWarning?`<p class="res">${esc(s.documentWarning)}</p>`:""}
     ${s.mode==="local-ocr"&&!s.detectedRows?'<p class="muted">Строки таблицы не распознаны. Сверьте документ по изображению или загрузите выгрузку ЭДО.</p>':""}
-    ${s.preview.length?`<details class="card" open><summary>Изображение документа</summary>
+    ${s.preview.length?`<details class="card"><summary>Изображение документа</summary>
     ${s.preview.map((data,i)=>`<img style="width:100%;height:auto" src="data:image/jpeg;base64,${esc(data)}" alt="Страница ${i+1} накладной">`).join("")}</details>`:""}
-    ${s.ocrText?`<details class="card"><summary>Распознанный текст</summary><p style="white-space:pre-wrap">${esc(s.ocrText)}</p></details>`:""}
     <form data-f="confirmocr" class="col">
     ${input("Поставщик","supplier",s.supplier)}
+    ${input("ИНН поставщика (необязательно)","supplierInn",s.supplierInn||"",null,false)}
     ${input("Покупатель","buyer",s.buyer,null,false)}
     ${s.buyer?"":'<p class="muted">Если в оригинале указан покупатель, внесите его из документа.</p>'}
     ${input("Номер","number",s.number)}
     ${input("Дата","date",s.date)}
     ${s.rows.map((row,i)=>`<fieldset class="card"><legend>Строка ${i+1}</legend>
+      ${row.calculatedFields?.length?`<p class="muted">Предложено расчётом: ${esc(row.calculatedFields.map(key=>calculatedLabels[key]||key).join(", "))}. Обязательно сверьте с оригиналом.</p>`:""}
       ${row.calculatedGross?'<p class="muted">Сумма с НДС рассчитана по прочитанным полям и общему итогу. Сверьте её с оригиналом.</p>':""}
-      ${row.needsReview&&!row.calculatedGross?'<p class="muted">Суммы распознаны не полностью или расходятся. Сверьте с оригиналом.</p>':row.rounding?'<p class="muted">Цена за единицу округлена. Сверьте сумму без НДС по оригиналу.</p>':""}
+      ${row.needsReview&&!row.calculatedGross?'<p class="muted">Проверьте наименование, фасовку и суммы по оригиналу. Пустые поля не удалось определить надёжно.</p>':row.rounding?'<p class="muted">Цена за единицу округлена. Сверьте сумму без НДС по оригиналу.</p>':""}
       ${input("Товар и фасовка","pos",row.pos,i)}
       <div class="row">${input("Единица","unit",row.unit,i)}${input("Количество","qty",row.qty,i)}</div>
       <div class="row">${input("Цена без НДС","netPrice",row.netPrice,i)}${input("Сумма без НДС","netSum",row.netSum,i)}</div>
@@ -134,14 +139,15 @@ function renderOcr(s){
     ${input("Итог по документу с НДС","total",s.total)}
     <p class="muted" role="status">${esc(s.error||"")}</p>
     <button class="btn p">Подтвердить и сохранить</button>
-    </form>`;
+    </form>
+    ${s.ocrText?`<details class="card"><summary>Исходный текст распознавания (для диагностики)</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;margin:0">${esc(s.ocrText)}</pre></details>`:""}`;
 }
 async function openOcr(item,state,mode){
   const xml=/\.xml$/i.test(item.name);
   const result=await incomingRequest("/documents/"+item.id+(xml?"/edi":"/recognize"),{method:xml?"GET":"POST"});
   if(S!==state||S.mode!==mode||sheet?.t!=="receivingsources")return "Откройте документ в очереди для проверки.";
   sheet={t:"ocr",queueId:item.id,name:item.name,mode:result.mode,supplierInn:result.supplierInn||"",supplier:result.supplier||"",buyer:result.buyer||"",number:result.number||"",
-    date:result.date||"",total:result.total||"",detectedRows:result.rows?.length||0,rows:result.rows?.length?result.rows:[blankOcrRow()],
+    date:result.date||"",total:result.total||"",documentWarning:result.documentWarning||"",detectedRows:result.rows?.length||0,rows:result.rows?.length?result.rows:[blankOcrRow()],
     preview:(result.preview||[]).filter(data=>/^[a-z0-9+/=]+$/i.test(data)),ocrText:result.ocrText||""};
   render(true);
   return "Проверьте распознанную накладную.";
@@ -152,6 +158,8 @@ function confirmOcr(){
   try{
     if(!draft.supplier.trim()||!draft.number.trim()||parseDate(draft.date)!==draft.date||!draft.date)
       throw new Error("Проверьте поставщика, номер и дату накладной.");
+    if(draft.supplierInn&&!/^(?:\d{10}|\d{12})$/.test(draft.supplierInn.trim()))
+      throw new Error("ИНН поставщика должен содержать 10 или 12 цифр.");
     const total=cents(readNumber(draft.total));
     let declaredRows=0;
     const sourceRows=draft.rows.map((r,i)=>{
@@ -172,7 +180,7 @@ function confirmOcr(){
     const rows=[...sourceRows,{pos:"Итого",sum:String(total/100)}];
     commitReceiving(()=>{
       const res=applyReceiving("invoice",{title:"Накладная · распознана и проверена",rows,metadata:[],
-        sourceDocumentId:draft.queueId,supplierInn:draft.supplierInn,buyer:draft.buyer?.trim(),taxBasis:"gross"},{name:draft.name});
+        sourceDocumentId:draft.queueId,supplierInn:draft.supplierInn?.trim(),buyer:draft.buyer?.trim(),taxBasis:"gross"},{name:draft.name});
       S.sec.receiving.docs={...S.sec.receiving.docs,invoice:{name:draft.name,res,local:true}};
     });
     sheet={t:"receivingsources"};
