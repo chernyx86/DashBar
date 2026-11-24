@@ -2,13 +2,32 @@ import io
 import shutil
 import unittest
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from time import monotonic
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr import recognize, expanded_grid, transport_grid, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address, validate_document_total
+from ocr import recognize, expanded_grid, transport_grid, split_quantity_grid, extract_expanded_rows, tesseract_options, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address, validate_document_total
 
 
 class ExpandedGridTest(unittest.TestCase):
+    def test_landscape_upd_with_three_quantity_columns(self):
+        image=Image.new('RGB',(900,600),'white')
+        draw=ImageDraw.Draw(image)
+        edges=(40,54,90,170,183,213,256,275,300,322,349,380,411,472,498,521,569,623,637,667,721,747,776,860)
+        for y in (180,247,254,272,290):
+            draw.line((40,y,860,y),fill='black',width=2)
+        draw.line((40,302,623,302),fill='black',width=2)
+        for x in edges:
+            draw.line((x,180,x,290),fill='black',width=2)
+        words=[(65,45,9,'Продавец'),(65,90,9,'Покупатель'),(335,296,9,'Всего'),(445,296,9,'13150,82'),(550,296,9,'2893,18'),(600,296,9,'16044,00')]
+        result=split_quantity_grid(image,words)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result[3]),3)
+        self.assertEqual(result[5][2],(322,349)) # packages, not 349–380 pieces
+        self.assertEqual(result[5][-1],(569,623))
+
     def test_numbered_header_and_item_boundaries(self):
         image=Image.new('RGB',(900,1200),'white')
         draw=ImageDraw.Draw(image)
@@ -94,10 +113,38 @@ class ExpandedGridTest(unittest.TestCase):
         self.assertEqual(delivery_address(image,words),'123456, г. Москва, ул. Тестовая, д. 7')
         self.assertEqual(delivery_address(image,words[7:]),'')
         self.assertEqual(delivery_address(image,[(90,150,12,'Грузополучатель'),(300,150,12,'ул'),(400,150,12,'по'),(500,150,12,'ОКПО'),(600,150,12,'26')]),'')
+        reverse=[(90,150,12,'Грузополучатель'),(300,150,12,'127051,'),(390,150,12,'г. Москва,'),(470,150,12,'Петровка'),(540,150,12,'ул.'),(615,150,12,'дом № 26'),(690,150,12,'стр. 3')]
+        self.assertEqual(delivery_address(image,reverse),'127051, г. Москва, Петровка ул. дом № 26 стр. 3')
 
 
 @unittest.skipUnless(shutil.which("tesseract"), "Требуется Tesseract")
 class RussianInvoiceTest(unittest.TestCase):
+    def test_split_quantity_cells_with_real_ocr(self):
+        image=Image.new('RGB',(2700,1800),'white')
+        draw=ImageDraw.Draw(image)
+        edges=(40,54,90,170,183,213,256,275,300,322,349,380,411,472,498,521,569,623,637,667,721,747,776,860)
+        for y in (180,247,254,274,294):
+            draw.line((120,y*3,2580,y*3),fill='black',width=4)
+        draw.line((120,306*3,623*3,306*3),fill='black',width=4)
+        for x in edges:
+            draw.line((x*3,540,x*3,882),fill='black',width=4)
+        for x in (411,472,521,569,623):
+            draw.line((x*3,882,x*3,918),fill='black',width=4)
+        font=ImageFont.truetype('DejaVuSans.ttf',23)
+        def label(x,y,value):
+            draw.text((x*3,y*3),value,font=font,fill='black',anchor='mm')
+        for y,values in [(264,('Сок 0,5л*12','упак','12','4','48','100,00','400,00','80,00','480,00')),
+                         (284,('Чай 0,5л*12','упак','12','7','84','100,00','700,00','140,00','840,00'))]:
+            for x,value in zip((130,287,311,335,364,395,441,545,596),values):label(x,y,value)
+        for x,value in [(335,'Всего'),(441,'1100,00'),(545,'220,00'),(596,'1320,00')]:label(x,300,value)
+        words=[(65*3,45*3,24,'Продавец'),(65*3,90*3,24,'Покупатель'),(335*3,300*3,24,'Всего'),(441*3,300*3,24,'1100,00'),(545*3,300*3,24,'220,00'),(596*3,300*3,24,'1320,00')]
+        layout=split_quantity_grid(image,words)
+        self.assertIsNotNone(layout)
+        with TemporaryDirectory() as folder:
+            rows,total=extract_expanded_rows(image,words,Path(folder)/'cell.png',monotonic()+90,tesseract_options(),layout)
+        self.assertEqual([(Decimal(r['qty']),Decimal(r['gross'])) for r in rows],[(Decimal(4),Decimal(480)),(Decimal(7),Decimal(840))])
+        self.assertEqual(Decimal(total),Decimal(1320))
+
     def sample(self):
         try:
             font = ImageFont.truetype("DejaVuSans.ttf", 31)
