@@ -99,7 +99,7 @@ function invoicePackLabel(row){
 }
 function ocrRowSummary(row){
   const qty=readNumber(row.qty),gross=readNumber(row.gross),pack=invoicePack(row);
-  return [invoicePackLabel(row),qty>0&&Number.isFinite(gross)?"Цена единицы: "+exactMoney(gross/qty):"Цена будет рассчитана из суммы и количества",pack&&Number.isFinite(gross)?exactMoney(gross/pack.baseQty)+"/"+pack.baseUnit:""].filter(Boolean).join(" · ");
+  return [invoicePackLabel(row),qty>0&&Number.isFinite(gross)?"Цена единицы: "+exactMoney(gross/qty):"Цена будет рассчитана из суммы и количества",pack?.pieceQty>0&&pack.packCount>1&&Number.isFinite(gross)?`${fmt(pack.pieceQty,0)} шт · ${exactMoney(gross/pack.pieceQty)}/шт`:"",pack&&Number.isFinite(gross)?exactMoney(gross/pack.baseQty)+"/"+pack.baseUnit:""].filter(Boolean).join(" · ");
 }
 function addressKey(value){return receiveKey(value).replace(/[.,;:()№]/g," ").replace(/\s+/g," ").trim();}
 // Build the vocabulary from this bar's own stock, count sheets and confirmed
@@ -313,6 +313,7 @@ function renderOcr(s){
     ${s.rows.map((row,i)=>`<fieldset class="card"><legend>Строка ${i+1}</legend>
       ${row.calculatedFields?.length?`<p class="muted">Предложено расчётом: ${esc(row.calculatedFields.map(key=>calculatedLabels[key]||key).join(", "))}. Обязательно сверьте с оригиналом.</p>`:""}
       ${row.calculatedGross?'<p class="muted">Сумма с НДС рассчитана по прочитанным полям и общему итогу. Сверьте её с оригиналом.</p>':""}
+      ${row.packReview?'<p class="muted">Фасовка восстановлена по повторному чтению. Сверьте объём бутылки с оригиналом.</p>':""}
       ${row.needsReview&&!row.calculatedGross?'<p class="muted">Проверьте наименование, фасовку и суммы по оригиналу. Пустые поля не удалось определить надёжно.</p>':row.rounding?'<p class="muted">Цена за единицу округлена. Сверьте сумму без НДС по оригиналу.</p>':""}
       ${input("Товар и фасовка","pos",row.pos,i)}
       <div id="ocr-catalog-${i}">${ocrCatalogHints(s,row,i,catalog)}</div>
