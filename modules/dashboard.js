@@ -30,7 +30,6 @@ function onboarding(){
   if(st==="venue") return top+`<div class="main"><div class="col"><h1>Заведение</h1><p class="sub">Приложение ведёт только бар: кухня и кальян в учёт не входят.</p></div>
    <label class="field">Название точки<input class="in" id="f-vname" data-b="venue.name" value="${esc(S.venue.name)}"></label>
    <label class="field">Город<input class="in" id="f-city" data-b="venue.city" value="${esc(S.venue.city)}"></label>
-   <label class="field">Название склада бара в учёте<input class="in" data-b="venue.stockName" value="${esc(S.venue.stockName)}" placeholder="Необязательно"></label>
    <div class="field">Формат${pills("venue.format",["Бар","Паб","Кальянная","Ресторан","Другое"],S.venue.format)}</div>
    <div class="field">Сколько точек ведёте${pills("venue.points",["1","2","3"],String(S.venue.points))}<span class="muted">Текущий профиль ведёт одну точку.</span></div></div>
    <div class="foot"><button class="btn p" data-a="next" data-s="three">Дальше</button></div>`;
