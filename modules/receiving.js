@@ -41,7 +41,7 @@ function invoicesByDate(){
   return S.data.invoices.slice().reverse().sort((a,b)=>b.date.localeCompare(a.date));
 }
 function invoiceReceiptStatus(invoice){
-  if(invoice.receiptAt)return "На приходе DashBar";
+  if(invoice.receiptAt)return invoice.automaticReceipt?"На приходе DashBar · автоматически":"На приходе DashBar";
   return invoice.status==="проведена"?"Проведена":"Ожидает прихода";
 }
 // Original invoice quantities are not changed. Multipliers apply only to
@@ -102,9 +102,83 @@ function ocrRowSummary(row){
   return [invoicePackLabel(row),qty>0&&Number.isFinite(gross)?"Цена единицы: "+exactMoney(gross/qty):"Цена будет рассчитана из суммы и количества",pack&&Number.isFinite(gross)?exactMoney(gross/pack.baseQty)+"/"+pack.baseUnit:""].filter(Boolean).join(" · ");
 }
 function addressKey(value){return receiveKey(value).replace(/[.,;:()№]/g," ").replace(/\s+/g," ").trim();}
+// Build the vocabulary from this bar's own stock, count sheets and confirmed
+// receipts. No extra stock movement or product is created by a suggestion.
+function invoiceCatalog(){
+  const entries=new Map(),add=(name,unit)=>{
+    name=String(name||"").trim();unit=receiveUnit(unit);
+    if(!name||!unit)return;
+    const key=receiveKey(name)+"|"+unit;
+    if(!entries.has(key))entries.set(key,{name,unit});
+  };
+  for(const [name,row] of Object.entries(effectiveStock()))add(name,row.unit);
+  for(const count of S.data.counts)for(const row of count.rows||[])add(row.pos,row.unit);
+  for(const inv of S.data.invoices)if(inv.receiptAt)for(const row of inv.rows||[])if(row.stockMatch)add(row.stockMatch.name,row.stockMatch.unit);
+  return [...entries.values()];
+}
+const catalogGeneric=new Set(["пиво","пивной","напиток","вино","игр","сортовое","сух","сухое","бел","белое","красное","чай","кофе","водка","ром","джин","виски","ликер","бут","бутылка","упак","категории","креп","емк","шт","грамм","бар"]);
+function catalogTokens(value){
+  // Fold visually identical OCR characters inside a word, including mixed Cyrillic/Latin brand names.
+  const fold={а:"a",в:"b",е:"e",к:"k",м:"m",н:"h",о:"o",р:"p",с:"c",т:"t",у:"y",х:"x"};
+  return [...new Set((receiveKey(value).match(/[\p{L}]{3,}/gu)||[]).filter(t=>!catalogGeneric.has(t)).map(t=>t.replace(/[авекмнорстух]/g,c=>fold[c])))];
+}
+function catalogWordSimilarity(a,b){
+  if(a===b)return 1;
+  if(Math.min(a.length,b.length)<4||Math.abs(a.length-b.length)>2)return 0;
+  let prev=Array.from({length:b.length+1},(_,i)=>i);
+  for(let i=1;i<=a.length;i++){
+    const next=[i];for(let j=1;j<=b.length;j++)next[j]=Math.min(next[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));prev=next;
+  }
+  return Math.max(0,1-prev[b.length]/Math.max(a.length,b.length));
+}
+function catalogSizes(value){
+  return [...new Set([...String(value||"").matchAll(/(?:^|[^\d\p{L}])(\d+(?:[,.]\d+)?)\s*(мл|л|кг|г)(?![\p{L}/])/giu)].map(m=>{
+    const scale=STOCK_UNIT_SCALE[receiveUnit(m[2])];return scale?scale[0]+":"+readNumber(m[1])*scale[1]:"";
+  }).filter(Boolean))];
+}
+function sameCatalogSupplier(invoice,prior){
+  if(invoice.supplierInn&&prior.supplierInn)return invoice.supplierInn===prior.supplierInn;
+  return !!receiveKey(invoice.supplier)&&receiveKey(invoice.supplier)===receiveKey(prior.supplier);
+}
+function catalogSuggestions(invoice,row,catalog=invoiceCatalog()){
+  const tokens=catalogTokens(row.pos);if(!tokens.length)return [];
+  const sourceSizes=catalogSizes(row.pos),history=new Map();
+  for(const inv of S.data.invoices)if(inv.receiptAt&&inv.id!==invoice.id&&sameCatalogSupplier(invoice,inv))for(const old of inv.rows||[])if(old.stockMatch){
+    const key=receiveKey(old.stockMatch.name)+"|"+receiveUnit(old.stockMatch.unit);
+    if(!history.has(key))history.set(key,[]);history.get(key).push(old.pos);
+  }
+  function score(name){
+    const target=catalogTokens(name);if(!target.length)return 0;
+    const hits=target.map(t=>Math.max(0,...tokens.map(v=>catalogWordSimilarity(v,t)))).filter(v=>v>=.77);
+    if(!hits.length||hits.length===1&&!(target.length===1&&target[0].length>=5&&hits[0]===1))return 0;
+    return hits.reduce((s,v)=>s+v,0)/target.length;
+  }
+  return catalog.flatMap(item=>{
+    const targetSizes=catalogSizes(item.name);
+    if(sourceSizes.length===1&&targetSizes.length===1&&sourceSizes[0]!==targetSizes[0])return [];
+    const key=receiveKey(item.name)+"|"+item.unit,aliases=history.get(key)||[];
+    const direct=receiveKey(row.pos)===receiveKey(item.name)?1:score(item.name);
+    const alias=Math.max(0,...aliases.map(a=>receiveKey(row.pos)===receiveKey(a)?1:score(a)));
+    const best=Math.max(direct,alias);if(best<.60)return [];
+    return [{...item,score:best+(alias>=.60?.15:0),learned:alias>=.60}];
+  }).sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name)).slice(0,3);
+}
+function ocrCatalogHints(invoice,row,index,catalog){
+  const chosen=row.stockMatch;
+  if(chosen)return `<p class="res">Сопоставлено: ${esc(chosen.name)} · ${esc(chosen.unit)} <button type="button" class="link" data-a="ocrcatalogclear" data-i="${index}">Отменить</button></p>`;
+  const candidates=catalogSuggestions(invoice,row,catalog);
+  if(!candidates.length)return "";
+  return `<div class="res"><b>Возможные позиции вашего бара</b>${candidates.map((item,j)=>`<button type="button" class="link" data-a="ocrcatalog" data-i="${index}" data-j="${j}">${esc(item.name)} · ${esc(item.unit)}${item.learned?" · история поставщика":" · справочник"}</button>`).join("")}</div>`;
+}
+function selectOcrCatalog(index,choice){
+  if(sheet?.t!=="ocr"||!sheet.rows[index])return;
+  const row=sheet.rows[index],item=catalogSuggestions(sheet,row)[choice];
+  if(!item)return;
+  row.stockMatch={name:item.name,unit:item.unit};render(true);
+}
 function suggestedStockMatch(invoice,row){
   if(row.stockMatch)return row.stockMatch;
-  const prior=S.data.invoices.filter(inv=>inv.id!==invoice.id&&inv.receiptAt&&receiveKey(inv.supplier)===receiveKey(invoice.supplier))
+  const prior=S.data.invoices.filter(inv=>inv.id!==invoice.id&&inv.receiptAt&&sameCatalogSupplier(invoice,inv))
     .flatMap(inv=>inv.rows.filter(r=>receiveKey(r.pos)===receiveKey(row.pos)&&receiveUnit(r.unit)===receiveUnit(row.unit)&&r.stockMatch).map(r=>r.stockMatch));
   const unique=new Map(prior.map(m=>[receiveKey(m.name)+"|"+receiveUnit(m.unit),m]));
   return unique.size===1?[...unique.values()][0]:null;
@@ -133,8 +207,17 @@ function saveInvoiceMapping(form){
       if(invoiceQuantityIn(row,unit)===null)throw new Error(`«${row.pos}»: не удалось перевести количество в ${unit}. Проверьте фасовку.`);
       return {...row,stockMatch:{name:existing?.name||name,unit}};
     });
-    commitReceiving(()=>{S.data.invoices=S.data.invoices.map(i=>i.id===inv.id?{...i,deliveryAddress:String(fields.get("address")||"").trim(),rows}:i);refreshReceivingFindings(invoiceChecks());});
-    sheet=null;render(true);toast("Сопоставление сохранено. Приход ещё не проведён.");
+    let posted=false;
+    commitReceiving(()=>{
+      const updated={...inv,deliveryAddress:String(fields.get("address")||"").trim(),rows};
+      S.data.invoices=S.data.invoices.map(i=>i.id===inv.id?updated:i);
+      if(S.venue.autoReceipt!==false&&updated.totalVerified){
+        try{const prepared=prepareReceipt(updated,true);recordReceipt(updated,prepared,true);posted=true;}
+        catch(error){updated.autoReceiptIssue=error.message;}
+      }
+      refreshReceivingFindings(invoiceChecks());
+    });
+    sheet=null;render(true);toast(posted?"Сопоставление сохранено. Приход автоматически отражён на складе DashBar.":"Сопоставление сохранено. Приход ещё не проведён.");
   }catch(error){s.error=error.message;render(true);}
 }
 function invoiceResults(invoices){
@@ -153,6 +236,7 @@ function invoiceResults(invoices){
       <summary><b>${esc(invoice.supplier||"Поставщик не указан")}${invoice.number?" · № "+esc(invoice.number):""}</b>
       <span class="muted">${invoice.date?ruDate(invoice.date):"Дата не указана"} · ${invoice.rows.length} строк · ${exactMoney(invoice.sum)}</span></summary>
       <p class="muted">${invoiceReceiptStatus(invoice)}${invoice.filename?" · "+esc(invoice.filename):""}</p>
+      ${invoice.autoReceiptIssue&&!invoice.receiptAt?`<p class="muted">${esc(invoice.autoReceiptIssue)}</p>`:""}
       ${invoice.buyer?`<p class="muted">Покупатель · ${esc(invoice.buyer)}</p>`:""}
       <p class="muted">Адрес поставки · ${esc(invoice.deliveryAddress||"не указан")}</p>
       ${invoice.receiptAt||invoice.status==="проведена"?"":`<button class="btn s" data-a="postreceipt" data-id="${esc(invoice.id)}">Поставить на приход</button>`}
@@ -204,12 +288,14 @@ const intakeOnServer=()=>!document.documentElement.hasAttribute?.("data-standalo
   ["http:","https:"].includes(location.protocol);
 function blankOcrRow(){return {pos:"",unit:"",qty:"",netPrice:"",netSum:"",vat:"",gross:"",needsReview:false};}
 function renderOcr(s){
+  const catalog=invoiceCatalog();
   const input=(label,key,value,index,required=true)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
     ${["qty","netPrice","netSum","vat","gross","total"].includes(key)?'inputmode="decimal"':key==="date"?'type="date"':""} value="${esc(value)}" ${required?"required":""}></label>`;
   const calculatedLabels={qty:"количество",netPrice:"цена",netSum:"сумма без НДС",vat:"НДС",gross:"сумма с НДС"};
   const pending=s.rows.filter(row=>row.needsReview||!row.pos||!row.unit||["qty","gross"].some(key=>row[key]==="" )).length;
   return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":"распознано на сервере DashBar"}</p>
     <p>Сверьте поставщика, покупателя, дату, фасовку, количество, цену, НДС и итог с оригиналом. Все поля можно исправить.</p>
+    <p class="muted">${catalog.length?`Справочник бара: ${catalog.length} позиций. Выберите подходящее название, если оно предложено.`:"Загрузите остатки или инвентаризацию в разделе «Склад», чтобы получать подсказки по названиям товаров."}</p>
     <div class="res" role="status"><b>Строк распознано: ${s.detectedRows}</b><span>${pending?`Нужно проверить: ${pending}.`:"Сверьте данные с оригиналом перед сохранением."}</span></div>
     ${s.documentWarning?`<p class="res">${esc(s.documentWarning)}</p>`:""}
     ${s.mode==="local-ocr"&&!s.detectedRows?'<p class="muted">Строки таблицы не распознаны. Сверьте документ по изображению или загрузите выгрузку ЭДО.</p>':""}
@@ -229,6 +315,7 @@ function renderOcr(s){
       ${row.calculatedGross?'<p class="muted">Сумма с НДС рассчитана по прочитанным полям и общему итогу. Сверьте её с оригиналом.</p>':""}
       ${row.needsReview&&!row.calculatedGross?'<p class="muted">Проверьте наименование, фасовку и суммы по оригиналу. Пустые поля не удалось определить надёжно.</p>':row.rounding?'<p class="muted">Цена за единицу округлена. Сверьте сумму без НДС по оригиналу.</p>':""}
       ${input("Товар и фасовка","pos",row.pos,i)}
+      <div id="ocr-catalog-${i}">${ocrCatalogHints(s,row,i,catalog)}</div>
       <div class="row">${input("Единица","unit",row.unit,i)}${input("Количество","qty",row.qty,i)}</div>
       ${input(s.documentWarning?"Сумма позиции":"Сумма с НДС","gross",row.gross,i)}
       <p class="res" id="ocr-summary-${i}">${esc(ocrRowSummary(row))}</p>
@@ -240,6 +327,7 @@ function renderOcr(s){
     ${input(s.documentWarning?"Итог по документу":"Итог по документу с НДС","total",s.total)}
     <p class="muted" role="status">${esc(s.error||"")}</p>
     <button class="btn p">Подтвердить и сохранить</button>
+    ${S.venue.autoReceipt!==false?'<p class="muted">При полном совпадении адреса и складских позиций накладная автоматически попадёт на склад DashBar.</p>':""}
     </form>
     ${s.ocrText?`<details class="card"><summary>Исходный текст распознавания (для диагностики)</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;margin:0">${esc(s.ocrText)}</pre></details>`:""}`;
 }
@@ -250,13 +338,19 @@ async function openOcr(item,state,mode){
   sheet={t:"ocr",queueId:item.id,name:item.name,mode:result.mode,supplierInn:result.supplierInn||"",supplier:result.supplier||"",buyer:result.buyer||"",number:result.number||"",
     date:result.date||"",deliveryAddress:result.deliveryAddress||"",total:result.total||"",documentWarning:result.documentWarning||"",detectedRows:result.rows?.length||0,rows:result.rows?.length?result.rows:[blankOcrRow()],
     preview:(result.preview||[]).filter(data=>/^[a-z0-9+/=]+$/i.test(data)),ocrText:result.ocrText||""};
+  const draft=sheet;
+  if(S.venue.autoReceipt!==false&&draft.detectedRows&&draft.buyer&&draft.rows.every(row=>draft.mode==="edi-xml"||
+      (draft.mode==="local-ocr"&&row.needsReview===false&&!row.calculatedGross&&!row.calculatedFields?.length))){
+    try{
+      const res=persistOcrDraft(draft,true);
+      sheet={t:"receivingsources"};render(true);
+      return await acknowledgeOcr(draft,res);
+    }catch(error){draft.error=error.message;}
+  }
   render(true);
   return "Проверьте распознанную накладную.";
 }
-function confirmOcr(){
-  const draft=sheet;
-  if(draft?.t!=="ocr"||incoming.busy)return;
-  try{
+function persistOcrDraft(draft,automaticOnly=false){
     if(!draft.supplier.trim()||!draft.number.trim()||parseDate(draft.date)!==draft.date||!draft.date)
       throw new Error("Проверьте поставщика, номер и дату накладной.");
     if(draft.supplierInn&&!/^(?:\d{10}|\d{12})$/.test(draft.supplierInn.trim()))
@@ -278,27 +372,38 @@ function confirmOcr(){
         (present("netSum")&&present("vat")&&sum+tax!==grossCents))
         throw new Error(`Строка ${i+1}: проверьте товар, количество, цену, НДС и сумму.`);
       declaredRows+=grossCents;
-      return {pos:r.pos.trim(),unit:r.unit.trim(),qty:String(qty),price:String(gross/qty),sum:String(gross),
+      if(r.stockMatch&&invoiceQuantityIn(r,r.stockMatch.unit)===null)throw new Error(`Строка ${i+1}: уточните фасовку для сопоставления со складом или отмените сопоставление.`);
+      return {pos:r.pos.trim(),unit:r.unit.trim(),qty:String(qty),price:String(gross/qty),sum:String(gross),...(r.stockMatch?{stockMatch:r.stockMatch}:{}),
         supplier:draft.supplier.trim(),date:draft.date,number:draft.number.trim(),
         ...(present("netPrice")?{netPrice:net}:{}),...(present("vat")?{vat}:{}),...(present("netSum")?{netSum:sum/100}:{}),sourceLine:i+1};
     });
     if(!Number.isSafeInteger(total)||!Number.isSafeInteger(declaredRows)||declaredRows!==total)
       throw new Error("Итог документа должен совпадать с суммой строк.");
     const rows=[...sourceRows,{pos:"Итого",sum:String(total/100)}];
+    let res;
     commitReceiving(()=>{
-      const res=applyReceiving("invoice",{title:"Накладная · распознана и проверена",rows,metadata:[],
+      res=applyReceiving("invoice",{title:"Накладная · распознана и проверена",rows,metadata:[],automaticOnly,
         sourceDocumentId:draft.queueId,supplierInn:draft.supplierInn?.trim(),buyer:draft.buyer?.trim(),deliveryAddress:draft.deliveryAddress?.trim(),taxBasis:draft.documentWarning?"":"gross"},{name:draft.name});
       S.sec.receiving.docs={...S.sec.receiving.docs,invoice:{name:draft.name,res,local:true}};
     });
+    return res;
+}
+async function acknowledgeOcr(draft,res){
+  const message=res.automaticReceipt?"Накладная сохранена, приход автоматически отражён на складе DashBar.":"Накладная сохранена в реестре.";
+  try{
+    await incomingRequest("/documents/"+draft.queueId+"/reviewed",{method:"POST"});
+    incoming.queue=incoming.queue.filter(r=>r.id!==draft.queueId);
+    return message;
+  }catch(e){return message+" Сервер не снял её с очереди. Уберите файл после проверки.";}
+}
+function confirmOcr(){
+  const draft=sheet;
+  if(draft?.t!=="ocr"||incoming.busy)return;
+  try{
+    const res=persistOcrDraft(draft);
     sheet={t:"receivingsources"};
     render(true);
-    return runIncoming(async()=>{
-      try{
-        await incomingRequest("/documents/"+draft.queueId+"/reviewed",{method:"POST"});
-        incoming.queue=incoming.queue.filter(r=>r.id!==draft.queueId);
-        return "Накладная сохранена в реестре.";
-      }catch(e){return "Накладная сохранена. Сервер не снял её с очереди. Уберите файл после проверки.";}
-    });
+    return runIncoming(()=>acknowledgeOcr(draft,res));
   }catch(e){draft.error=e.message;render(true);}
 }
 function incomingQueue(){
