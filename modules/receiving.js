@@ -117,10 +117,28 @@ function invoiceCatalog(){
   return [...entries.values()];
 }
 const catalogGeneric=new Set(["пиво","пивной","напиток","вино","игр","сортовое","сух","сухое","бел","белое","красное","чай","кофе","водка","ром","джин","виски","ликер","бут","бутылка","упак","категории","креп","емк","шт","грамм","бар"]);
+function quotedProductNames(value){
+  return [...new Set([...String(value||"").matchAll(/«([^»]+)»|[“„]([^”"]+)[”"]|"([^"\n]+)"/g)].map(m=>(m[1]||m[2]||m[3]).trim()).filter(name=>name.length>=2&&/\p{L}/u.test(name)))];
+}
+function invoiceDisplayName(row){
+  if(row.stockMatch?.name)return row.stockMatch.name;
+  const choices=quotedProductNames(row.pos);
+  return choices.length===1?choices[0]:row.pos;
+}
 function catalogTokens(value){
   // Fold visually identical OCR characters inside a word, including mixed Cyrillic/Latin brand names.
   const fold={а:"a",в:"b",е:"e",к:"k",м:"m",н:"h",о:"o",р:"p",с:"c",т:"t",у:"y",х:"x"};
   return [...new Set((receiveKey(value).match(/[\p{L}]{3,}/gu)||[]).filter(t=>!catalogGeneric.has(t)).map(t=>t.replace(/[авекмнорстух]/g,c=>fold[c])))];
+}
+function catalogPhoneticTokens(value){
+  const letters={а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'kh',ц:'ts',ч:'ch',ш:'sh',щ:'shch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya'};
+  return [...new Set((receiveKey(value).match(/[\p{L}]{3,}/gu)||[]).filter(t=>!catalogGeneric.has(t)).map(t=>[...t].map(c=>letters[c]??c).join('')
+    .replace(/kh/g,'h').replace(/ei|ay/g,'ai').replace(/c(?=[aou])/g,'k').replace(/(.)\1+/g,'$1')).filter(Boolean))];
+}
+function catalogAliasKey(tokens){
+  // Explicit shorthand; do not equate other variants such as Corona Cero.
+  const name=tokens.join(' ');
+  return /^(?:korona|korona (?:extra|ekstra))$/.test(name)?'korona-extra':name;
 }
 function catalogWordSimilarity(a,b){
   if(a===b)return 1;
@@ -142,6 +160,8 @@ function sameCatalogSupplier(invoice,prior){
 }
 function catalogSuggestions(invoice,row,catalog=invoiceCatalog()){
   const tokens=catalogTokens(row.pos);if(!tokens.length)return [];
+  const sourceNames=[...quotedProductNames(row.pos),row.pos];
+  const sourcePhonetics=sourceNames.map(catalogPhoneticTokens).filter(t=>t.length);
   const sourceSizes=catalogSizes(row.pos),history=new Map();
   for(const inv of S.data.invoices)if(inv.receiptAt&&inv.id!==invoice.id&&sameCatalogSupplier(invoice,inv))for(const old of inv.rows||[])if(old.stockMatch){
     const key=receiveKey(old.stockMatch.name)+"|"+receiveUnit(old.stockMatch.unit);
@@ -149,9 +169,27 @@ function catalogSuggestions(invoice,row,catalog=invoiceCatalog()){
   }
   function score(name){
     const target=catalogTokens(name);if(!target.length)return 0;
-    const hits=target.map(t=>Math.max(0,...tokens.map(v=>catalogWordSimilarity(v,t)))).filter(v=>v>=.77);
-    if(!hits.length||hits.length===1&&!(target.length===1&&target[0].length>=5&&hits[0]===1))return 0;
-    return hits.reduce((s,v)=>s+v,0)/target.length;
+    const targetNames=[...quotedProductNames(name),name];
+    const targetPhonetics=targetNames.map(catalogPhoneticTokens).filter(t=>t.length);
+    const coronaExtra=variants=>variants.some(t=>catalogAliasKey(t)==='korona-extra');
+    const coronaOther=variants=>variants.some(t=>t.includes('korona')&&t.some(v=>['cero','sero','zero','light','lait','б/а','bezalkogolnoe'].includes(v)));
+    if((coronaExtra(sourcePhonetics)&&coronaOther(targetPhonetics))||(coronaExtra(targetPhonetics)&&coronaOther(sourcePhonetics)))return 0;
+    function compare(source,target){
+      if(!target.length)return 0;
+      const hits=target.map(t=>Math.max(0,...source.map(v=>catalogWordSimilarity(v,t)))).filter(v=>v>=.77);
+      if(!hits.length||hits.length===1&&!(target.length===1&&target[0].length>=5&&hits[0]===1))return 0;
+      return hits.reduce((s,v)=>s+v,0)/target.length;
+    }
+    let best=compare(tokens,target);
+    for(const sourceName of sourceNames)for(const targetName of targetNames)best=Math.max(best,compare(catalogTokens(sourceName),catalogTokens(targetName)));
+    for(const phonetic of targetPhonetics){
+      const alias=catalogAliasKey(phonetic);
+      for(const source of sourcePhonetics){
+        if(alias&&catalogAliasKey(source)===alias)best=Math.max(best,.98);
+        else best=Math.max(best,compare(source,phonetic)*.95);
+      }
+    }
+    return best;
   }
   return catalog.flatMap(item=>{
     const targetSizes=catalogSizes(item.name);
@@ -166,9 +204,11 @@ function catalogSuggestions(invoice,row,catalog=invoiceCatalog()){
 function ocrCatalogHints(invoice,row,index,catalog){
   const chosen=row.stockMatch;
   if(chosen)return `<p class="res">Сопоставлено: ${esc(chosen.name)} · ${esc(chosen.unit)} <button type="button" class="link" data-a="ocrcatalogclear" data-i="${index}">Отменить</button></p>`;
+  const display=invoiceDisplayName(row);
+  const shortName=display!==row.pos?`<p class="muted">Название для реестра: ${esc(display)}</p>`:"";
   const candidates=catalogSuggestions(invoice,row,catalog);
-  if(!candidates.length)return "";
-  return `<div class="res"><b>Возможные позиции вашего бара</b>${candidates.map((item,j)=>`<button type="button" class="link" data-a="ocrcatalog" data-i="${index}" data-j="${j}">${esc(item.name)} · ${esc(item.unit)}${item.learned?" · история поставщика":" · справочник"}</button>`).join("")}</div>`;
+  if(!candidates.length)return shortName;
+  return shortName+`<div class="res"><b>Возможные позиции вашего бара</b>${candidates.map((item,j)=>`<button type="button" class="link" data-a="ocrcatalog" data-i="${index}" data-j="${j}">${esc(item.name)} · ${esc(item.unit)}${item.learned?" · история поставщика":" · справочник"}</button>`).join("")}</div>`;
 }
 function selectOcrCatalog(index,choice){
   if(sheet?.t!=="ocr"||!sheet.rows[index])return;
@@ -250,7 +290,7 @@ function paintInvoiceResults(){
 }
 function invoiceRows(invoice){
   const tax=invoice.taxBasis==="gross"?" с НДС":"";
-  const rows=invoice.rows.map(row=>{const p=invoicePack(row);return [row.stockMatch?.name||row.pos,fmt(row.qty,4)+(row.unit?" "+row.unit:""),invoicePackLabel(row),exactMoney(row.sum/row.qty),p?exactMoney(row.sum/p.baseQty)+"/"+p.baseUnit:"—",exactMoney(row.sum)];});
+  const rows=invoice.rows.map(row=>{const p=invoicePack(row);return [invoiceDisplayName(row),fmt(row.qty,4)+(row.unit?" "+row.unit:""),invoicePackLabel(row),exactMoney(row.sum/row.qty),p?exactMoney(row.sum/p.baseQty)+"/"+p.baseUnit:"—",exactMoney(row.sum)];});
   const canMap=!invoice.receiptAt&&invoice.status!=="проведена";
   return table(["Позиция","Кол-во","Фасовка и объём","Цена"+tax,"Цена ед. учёта","Сумма"+tax],rows)+
     (!invoice.taxBasis?'<p class="muted">Налоговая основа стоимости в исходнике не подтверждена.</p>':"")+
