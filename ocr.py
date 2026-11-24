@@ -330,6 +330,75 @@ def expanded_grid(image, words):
     return gray.rotate(angle,fillcolor=255,resample=Image.Resampling.BICUBIC),mask,scale,boundaries,total_end,cells,angle
 
 
+def split_quantity_grid(image, words):
+    """Find a landscape UPD with separate package size, packages and pieces.
+
+    Anchor the ruled table at its printed total rather than at a fragile OCR
+    reading of the tiny column headings. Require the characteristic sequence
+    of quantity, price, net, excise, tax rate, tax and gross columns.
+    """
+    w,h=image.size
+    if w<=h:return None
+    text=page_text(words).casefold()
+    if not ('продав' in text and ('покупател' in text or 'грузополуч' in text)):
+        return None
+    scale=w/900
+    gray=ImageOps.grayscale(image)
+    small=gray.resize((900,round(h/scale)),Image.Resampling.LANCZOS)
+    base=small.point(lambda p:255 if p<180 else 0)
+    totals=[(x/scale,y/scale) for x,y,_,t in words if x<w*.48 and h*.25<y<h*.85
+            and re.sub(r'\W','',t.casefold()).translate(OCR_TOTAL_LABEL)=='всего']
+    for tx,ty in totals:
+        top=max(0,round(ty)-140);bottom=min(small.height,round(ty)+20)
+        best=None
+        for angle in (0,-.25,.25,-.5,.5,-.75,.75,-1,1,-1.5,1.5,-2,2):
+            mask=base.rotate(angle,fillcolor=0)
+            p=column_profile(mask,(20,top,880,bottom))
+            score=sum(v*v for v in p if v>=45)
+            if best is None or score>best[0]:best=(score,angle,mask,p)
+        _,angle,mask,p=best
+        def transform(x,y):
+            dx,dy=x-450,y-small.height/2;a=radians(angle)
+            return 450+cos(a)*dx+sin(a)*dy,small.height/2-sin(a)*dx+cos(a)*dy
+        _,total_y=transform(tx,ty)
+        rules=profile_peaks(p,top,45)
+        above=[v for v in rules if v<total_y-1];below=[v for v in rules if v>total_y+1]
+        if not above or not below or not 5<=below[0]-above[-1]<=25:continue
+        end,total_end=above[-1],below[0]
+        # The narrow numbered header ends just before the first item band.
+        starts=[b for a,b in zip(rules,rules[1:]) if 3<=b-a<=10 and 9<=end-b<=120]
+        if not starts:continue
+        start=starts[-1]
+        lines=[v for v in rules if start<=v<=end]
+        if len(lines)<2 or any(not 8<=b-a<=60 for a,b in zip(lines,lines[1:])):continue
+        edges=profile_peaks(column_profile(mask,(0,start+2,900,end-2),True),0,90)
+        header_profile=column_profile(mask,(0,max(top,start-60),900,start-3),True)
+        edges=[x for x in edges if max(header_profile[max(0,x-3):min(900,x+4)],default=0)>=48]
+        # A total row contains three monetary fields. The rightmost one
+        # must lie inside the gross column of the item grid.
+        money=[]
+        for x,y,_,token in words:
+            xx,yy=transform(x/scale,y/scale)
+            if end-2<=yy<=total_end+2 and xx>tx+50 and re.search(r'\d{3,}',token):money.append(xx)
+        if not money:continue
+        gross_x=max(money)
+        matches=[i for i,(a,b) in enumerate(zip(edges,edges[1:])) if a<gross_x<b and 25<=b-a<=100]
+        if len(matches)!=1:continue
+        i=matches[0]
+        if i<10:continue
+        widths=[edges[j+1]-edges[j] for j in range(i-9,i+1)]
+        if not (all(10<=v<=48 for v in widths[:4]) and 12<=widths[4]<=55
+                and 28<=widths[5]<=100 and 8<=widths[6]<=45 and 8<=widths[7]<=45
+                and 20<=widths[8]<=90):continue
+        names=[(a,b) for a,b in zip(edges[:i-9],edges[1:i-8]) if 50<=b-a<=180]
+        if len(names)!=1:continue
+        def cell(j):return (edges[j],edges[j+1])
+        columns=[names[0],cell(i-9),cell(i-7),cell(i-5),cell(i-4),cell(i-1),cell(i)]
+        # Return the split quantity cells too, for checking packaging.
+        return gray.rotate(angle,fillcolor=255,resample=Image.Resampling.BICUBIC),mask,scale,lines,total_end,columns,angle,cell(i-8),cell(i-6)
+    return None
+
+
 def standard_upd_grid(image, words):
     """Locate item rows in the printed Russian UPD (universal transfer form).
 
@@ -921,7 +990,8 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
     layout=layout or expanded_grid(image,words)
     if not layout:
         return [],''
-    gray,mask,scale,lines,total_end,columns,angle=layout
+    gray,mask,scale,lines,total_end,columns,angle=layout[:7]
+    split=len(layout)==9
     if high_image is not None:
         gray=ImageOps.grayscale(high_image).rotate(angle,fillcolor=255,resample=Image.Resampling.BICUBIC)
         scale=gray.width/900
@@ -929,7 +999,7 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
     for y,z in zip(lines,lines[1:]):
         if deadline-monotonic()<5:
             return [],''
-        cells=[grid_cell(gray,mask,scale,(a,y,b,z),short=i>0) for i,(a,b) in enumerate(columns)]
+        cells=[grid_cell(gray,mask,scale,(a,y,b,z),short=i>0 and not split) for i,(a,b) in enumerate(columns)]
         pos=' '.join(grid_text(cells[0],scratch,deadline,options,'text','rus+eng').split())
         pos=re.sub(r'\s+',' ',pos.replace('|',' ').replace('_',' ')).strip(' —')
         if high_image is not None and len(re.findall(r'[А-Яа-яЁё]{2,}', pos)) < 2:
@@ -956,6 +1026,8 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
         units.update(re.sub(r'[^а-я]','',t.casefold()) for x,yy,_,t in words
                      if (a-3)/900*image.width<=x<(b+3)/900*image.width
                      and (y-2)/mask.height*image.height<=yy<(y+13)/mask.height*image.height)
+        aliases={'упак':'уп','упаковка':'уп','упаковок':'уп','бутылка':'бут'}
+        units={aliases.get(u,u) for u in units}
         units&={'шт','кг','уп','бут','л','г','мл'}
         unit=units.pop() if len(units)==1 else ''
         choices=[];votes=[]
@@ -975,16 +1047,28 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
                 for value in decimal_candidates([raw],i>0):
                     counts[value]=counts.get(value,0)+1
             votes.append(counts)
+        if split:
+            # Packaging quantity is the billed quantity. Never substitute the
+            # pieces column: printed price and net amount refer to packages.
+            count_reads=[]
+            for a,b in layout[7:9]:
+                cell=direct_grid_cell(gray,scale,(a,y,b,z))
+                count_reads.append(decimal_candidates([grid_text(cell,scratch,deadline,options,'number','eng',binary) for binary in (False,True)],False))
+            pack_sizes,piece_counts=count_reads
+            compatible=[q for q in choices[0] if q>0 and any(s>0 and s==s.to_integral_value() and q*s in piece_counts for s in pack_sizes)]
+            if len(compatible)==1:
+                choices[0]=compatible
+                if not unit:unit='уп'
         result.append(dict(pos=pos,unit=unit,candidates=choices,votes=votes))
     # Independent full-page OCR of the printed total, near the total label.
     total_labels=[y for x,y,_,t in words if x<image.width*.4 and abs(y/image.height-lines[-1]/mask.height)<.05
                   and re.sub(r'\W','',t.casefold()).translate(OCR_TOTAL_LABEL) in {'всего','итого'}]
     def read_total(a,b):
         printed={number_in_column(words,y,image.width*.018,(a-5)/900*image.width,(b+5)/900*image.width) for y in total_labels}
-        printed={Decimal(v) for v in printed if v}
+        printed=set(decimal_candidates([v for v in printed if v],True)) if split else {Decimal(v) for v in printed if v}
         cell=grid_cell(gray,mask,scale,(a-1,lines[-1],b,total_end),total=True)
         cell_values=decimal_candidates([grid_text(cell,scratch,deadline,options,'number',lang,binary)
-                                       for lang,binary in (('eng',True),('rus',True),('eng',False))],False)
+                                       for lang,binary in (('eng',True),('rus',True),('eng',False))],split)
         return printed,set(cell_values)
     printed,cell_values=read_total(*columns[-1])
     total_value=next(iter(printed)) if len(printed)==1 else next(iter(cell_values)) if len(cell_values)==1 else None
@@ -993,8 +1077,21 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
     vat_print,vat_cell=read_total(*columns[5])
     net_matches={n for n,v in product(net_print|net_cell,vat_print|vat_cell) if n+v==total_value}
     doc_net=next(iter(net_matches)) if len(net_matches)==1 else None
-    chosen=resolve_grid_document(result,total,doc_net)
-    basic=resolve_grid_core(result,total) if not chosen else None
+    if split:
+        # OCR can lose a decimal comma; accept a total only if the row
+        # amounts reconcile and the printed net plus tax confirms it.
+        confirmed=[]
+        for candidate in printed|cell_values:
+            nets={n for n,v in product(net_print|net_cell,vat_print|vat_cell) if n+v==candidate}
+            if len(nets)!=1:continue
+            candidate_total=format(candidate,'f')
+            resolved=resolve_grid_document(result,candidate_total,next(iter(nets)))
+            core=resolve_grid_core(result,candidate_total) if not resolved else None
+            if resolved or core:confirmed.append((candidate_total,resolved,core))
+        total,chosen,basic=confirmed[0] if len(confirmed)==1 else ('',None,None)
+    else:
+        chosen=resolve_grid_document(result,total,doc_net)
+        basic=resolve_grid_core(result,total) if not chosen else None
     for i,row in enumerate(result):
         candidates=row.pop('candidates')
         row.pop('votes',None)
@@ -1153,7 +1250,7 @@ def invoice_fields(image, words):
 
 def high_resolution_header_fields(image, scratch, deadline, options):
     """Retry UPD header fields with a larger OCR pass when page TSV missed them."""
-    header = image.crop((0, 0, image.width, round(image.height * .24)))
+    header = image.crop((0, 0, image.width, round(image.height * (.42 if image.width>image.height else .24))))
     ImageOps.autocontrast(ImageOps.grayscale(header), cutoff=1).save(scratch)
     try:
         raw = command(["tesseract", str(scratch), "stdout", *options, "-l", "+".join(OCR_LANGUAGES), "--psm", "6"],
@@ -1199,10 +1296,6 @@ def high_resolution_header_fields(image, scratch, deadline, options):
     if buyer_label:
         end = min((p.start() for p in re.finditer(r"инн|кпп|адрес|грузополуч", text[buyer_label.start():], re.I)), default=260)
         result["buyer"] = company(text[buyer_label.start():buyer_label.start()+end])
-        buyer_block = text[buyer_label.start():buyer_label.start()+420]
-        address = re.search(r"\b(\d{6})\s*,?\s*((?:г\.?\s*)?[а-яеё][^\n()]{4,130}?(?:ул\.?|улица|пер\.?|переулок|проспект|шоссе|наб\.?)[^\n()]{0,80}?(?:дом\s*(?:№\s*)?\d+|д\.?\s*\d+))", buyer_block, re.I)
-        if address:
-            result["deliveryAddress"] = (address[1] + " " + address[2]).strip(" ,.;")
     return result
 
 
@@ -1220,7 +1313,10 @@ def delivery_address(image,words):
         nearby=[entry for entry in words if x+width*.025<entry[0]<width*.94 and abs(entry[1]-y)<max(h*1.3,width*.012)]
         line=' '.join(page_text(nearby).split())
         # Require a street/house marker; a bare company or a postal code is not an address.
-        street=re.search(r'(?<!\w)(?:улица|ул\.?|переулок|пер\.?|проспект|пр-т|шоссе|наб\.?|бульвар|площадь)\s+([А-Яа-яЁё-]{2,})',line,re.I)
+        street_type=r'(?:улица|ул\.?|переулок|пер\.?|проспект|пр-т|шоссе|наб\.?|бульвар|площадь)'
+        street=re.search(r'(?<!\w)'+street_type+r'\s+([А-Яа-яЁё-]{2,})',line,re.I)
+        if not street or street[1].casefold() in {'по','окпо','инн','кпп','адрес','получатель','грузополучатель','дом'}:
+            street=re.search(r'(?<!\w)([А-Яа-яЁё-]{2,})\s+'+street_type+r'(?=\s*[,.;]?\s*(?:дом|д\.|№|\d))',line,re.I)
         if not street or not re.search(r'\d',line[street.start():]):
             continue
         if street[1].casefold() in {'по','окпо','инн','кпп','адрес','получатель','грузополучатель','дом'}:
@@ -1320,9 +1416,9 @@ def recognize(name, data):
             if transport:
                 layout = transport_grid(image, words)
             else:
-                layout = standard_upd_grid(image, words) or expanded_grid(image, words)
+                layout = split_quantity_grid(image, words) or standard_upd_grid(image, words) or expanded_grid(image, words)
             high_image=None
-            if layout and Path(name).suffix.lower()=='.pdf' and deadline-monotonic()>15:
+            if (layout or index==1) and Path(name).suffix.lower()=='.pdf' and deadline-monotonic()>15:
                 try:
                     prefix=folder/f'high-{index}'
                     command(['pdftoppm','-f',str(index),'-l',str(index),'-singlefile','-scale-to','5000','-png',str(folder/'source.pdf'),str(prefix)],timeout=30)
@@ -1337,7 +1433,18 @@ def recognize(name, data):
                 rows, page_total = extract_rows(image,words)
             if index==1:
                 fields = invoice_fields(image, words)
-                if high_image is not None and any(not fields.get(key) for key in ("number", "date", "supplier", "buyer")):
+                if high_image is not None and any(not fields.get(key) for key in ("number", "date", "supplier", "buyer", "deliveryAddress")) and deadline-monotonic()>8:
+                    # Read the header at source resolution; the coordinate
+                    # parser keeps the consignee separate from the buyer.
+                    header=high_image.crop((0,0,high_image.width,round(high_image.height*(.44 if high_image.width>high_image.height else .30))))
+                    try:
+                        header_words=words_from_image(header,folder/'header-tsv.png',min(12,deadline-monotonic()),options)
+                        recovered=invoice_fields(high_image,header_words)
+                        for key,value in recovered.items():
+                            if not fields.get(key) and value:fields[key]=value
+                    except RecognitionError:
+                        pass
+                if high_image is not None and any(not fields.get(key) for key in ("number", "date", "supplier", "buyer")) and deadline-monotonic()>8:
                     retry = high_resolution_header_fields(high_image, folder/"header.png", deadline, options)
                     for key, value in retry.items():
                         if not fields.get(key) and value:
