@@ -222,8 +222,8 @@ function warehouseLabel(rows){
   return cellText(row[0]).split(":").slice(1).join(":").trim()||row.slice(1).map(cellText).find(Boolean)||"";
 }
 function barWarehouse(name){
-  if(!name||/(кухн|кальян|хука)/i.test(name))return false;
-  return S.venue.stockName.trim()?receiveKey(name)===receiveKey(S.venue.stockName):/^бар(?:[\s(–-]|$)/i.test(name);
+  const key=receiveKey(name);
+  return !!key&&!/(кухн|кальян|хука)/i.test(key)&&!/^(?:итого|всего|общий остаток|сумма|стоимость|цена|код|артикул|группа|категория|единица|ед\. ?изм|количество|остаток)(?:$|\s|[.,:])/i.test(key);
 }
 const itemTotal=name=>/^(?:итого|всего)(?:$| по )/.test(receiveKey(name));
 function stockWorkbook(rows,sheetName){
@@ -242,9 +242,9 @@ function stockWorkbook(rows,sheetName){
   const code=inColumn(osv?rows[header+1]:columns,["артикул","код","код товара"]);
   const date=osv?rows.slice(0,6).flat().map(cellText).join(" ").match(/(?:^|\s)по\s+(\d{2}\.\d{2}\.\d{4})/i)?.[1]:findDate(rows.slice(0,header));
   const balance=inColumn(columns,["остатки на конец","остаток на конец"]);
-  const options=osv?[{warehouse:warehouseLabel(rows),index:balance}]:columns.map((cell,index)=>({warehouse:cellText(cell),index}))
-    .filter(entry=>entry.index>unit&&barWarehouse(entry.warehouse));
-  if(!options.length||pos<0||options.some(entry=>!barWarehouse(entry.warehouse)))throw new Error("Выберите выгрузку с отдельным складом бара. Если в учёте он называется иначе, укажите точное название в настройках.");
+  const options=osv?[{warehouse:warehouseLabel(rows)||"Бар",index:balance}]:columns.map((cell,index)=>({warehouse:cellText(cell),index}))
+    .filter(entry=>entry.index>Math.max(unit,pos)&&barWarehouse(entry.warehouse)&&rows.slice(header+1).some(r=>cellText(r[pos])&&!itemTotal(cellText(r[pos]))&&Number.isFinite(readNumber(r[entry.index]))));
+  if(!options.length||pos<0||unit<0||options.some(entry=>!barWarehouse(entry.warehouse)))throw new Error("В выгрузке нет отдельной колонки остатков бара. Выберите отчёт по бару; кухня, кальян и общий итог не загружаются.");
   if(osv&&inColumn([rows[header+1][balance]],["кол во","количество"])!==0)throw new Error("В ведомости не найдена колонка количества на конец периода.");
   return options.map(({warehouse,index})=>{
     const start=header+(osv?2:1);
@@ -383,14 +383,16 @@ function previewUpload(s){
   if(s.kind==="facts"){
     const count=s.items.reduce((n,item)=>n+item.rows.filter(r=>r.fact!==null).length,0);
     const stock=S.data.stockReference?.snapshot;
-    const comparable=s.items.every(item=>stock&&item.date&&stock.date===item.date&&item.date<=todayISO()&&
-      barWarehouse(item.warehouse)&&receiveKey(stock.warehouse)===receiveKey(item.warehouse));
-    const why=!s.items.every(i=>barWarehouse(i.warehouse))?"Склад в бланке не распознан как отдельный бар. Загрузите отдельную выгрузку или проверьте название склада в настройках.":
-      !stock?"Загрузите учётные остатки бара на дату инвентаризации.":"Проверьте, совпадают ли дата и склад с учётными остатками.";
+    const eligible=s.items.every(i=>!i.warehouse||barWarehouse(i.warehouse));
+    const sameLabel=!!stock&&s.items.every(i=>i.warehouse&&receiveKey(stock.warehouse)===receiveKey(i.warehouse));
+    const comparable=eligible&&(sameLabel||s.warehouseConfirmed)&&s.items.every(item=>stock&&item.date&&stock.date===item.date&&item.date<=todayISO());
+    const why=!eligible?"Выберите бланк инвентаризации бара.":
+      !stock?"Загрузите учётные остатки бара на дату инвентаризации.":"Проверьте дату и подтвердите, что инвентаризация относится к текущему бару.";
     const mergeable=comparable?prepareFactDraft(s.items):{};
     return `<h2>${label}</h2><p class="muted">${esc(s.file)}</p>${table(["Лист","Дата","Склад","С фактом","Без факта"],s.items.map(item=>[
       item.label,item.date?ruDate(item.date):"—",item.warehouse||"—",
       String(item.rows.filter(r=>r.fact!==null).length),String(item.rows.filter(r=>r.fact===null).length)]))}
+      ${eligible&&stock&&!sameLabel?`<label><input type="checkbox" data-count-warehouse ${s.warehouseConfirmed?"checked":""}> Это инвентаризация текущего бара</label>`:""}
       <p>${count} заполненных строк.${comparable?` Совпали с учётом по названию и единице: ${Object.keys(mergeable).length}.`:" "+esc(why)}</p>
       ${Object.keys(mergeable).length?`<button class="btn p" data-a="importpreview">Перенести совпадения в черновик</button>`:""}`;
   }
@@ -398,13 +400,13 @@ function previewUpload(s){
     const previous=S.sec.stock.docs.rest?.res?.snapshot;
     const older=previous?.date&&option.date&&previous.date>option.date;
     const future=option.date>todayISO();
-    const other=previous?.warehouse&&receiveKey(previous.warehouse)!==receiveKey(option.warehouse);
     return `<h2>${label}</h2><p class="muted">${esc(s.file)}</p>${select}
       <p>${esc(option.type)} · ${esc(option.warehouse)} · ${option.date?ruDate(option.date):"дата отсутствует"}</p>
       <p>Готово к загрузке: ${option.rows.length} строк.${option.excluded?" Исключено из-за повторов названия: "+option.excluded+".":""}</p>
       ${table(["Позиция","Остаток"],option.rows.slice(0,5).map(r=>[r.pos,fmt(r.qty,4)+" "+r.unit]))}
-      ${future?'<p>Дата остатков не может быть в будущем.</p>':older?'<p>В приложении уже есть остатки на более позднюю дату.</p>':other?'<p>Загруженный склад отличается от текущего.</p>':''}
-      <button class="btn p" data-a="importpreview" ${older||future||other||!option.rows.length||!option.date?"disabled":""}>Сохранить остатки бара</button>`;
+      ${future?'<p>Дата остатков не может быть в будущем.</p>':older?'<p>В приложении уже есть остатки на более позднюю дату.</p>':''}
+      <p class="muted">Выбранная колонка будет остатками текущего бара.</p>
+      <button class="btn p" data-a="importpreview" ${older||future||!option.rows.length||!option.date?"disabled":""}>Сохранить остатки бара</button>`;
   }
   const candidates=priceCandidates(option);
   return `<h2>${label}</h2><p class="muted">${esc(s.file)}</p>${select}
@@ -450,7 +452,7 @@ async function commitWorkbookPreview(){
       const snapshot=S.data.stockReference?.snapshot;
       const split=s.kind==="splitFacts";
       const compatible=snapshot&&snapshot.date<=todayISO()&&(split?s.warehouseConfirmed&&s.date===snapshot.date&&barWarehouse(snapshot.warehouse):
-        s.items.every(i=>i.date===snapshot.date&&barWarehouse(i.warehouse)&&receiveKey(i.warehouse)===receiveKey(snapshot.warehouse)));
+        s.items.every(i=>i.date===snapshot.date&&(!i.warehouse||barWarehouse(i.warehouse)))&&(s.warehouseConfirmed||s.items.every(i=>i.warehouse&&receiveKey(i.warehouse)===receiveKey(snapshot.warehouse))));
       if(!compatible)
         throw new Error("Для сверки нужны остатки того же склада и даты.");
       const sources=split?Object.create(null):null;
@@ -466,8 +468,7 @@ async function commitWorkbookPreview(){
     }else if(s.kind==="balances"){
       const previous=S.sec.stock.docs.rest?.res?.snapshot;
       if(option.date>todayISO())throw new Error("Дата остатков не может быть в будущем.");
-      if(!option.rows.length||!option.date||!barWarehouse(option.warehouse)||previous?.date>option.date||
-          (previous?.warehouse&&receiveKey(previous.warehouse)!==receiveKey(option.warehouse)))throw new Error("Проверьте дату и склад.");
+      if(!option.rows.length||!option.date||!barWarehouse(option.warehouse)||previous?.date>option.date)throw new Error("Проверьте дату и склад.");
       const stock=Object.fromEntries(option.rows.map(r=>[r.pos,{qty:r.qty,unit:r.unit}]));
       const referenceStock=Object.fromEntries(option.rows.map(r=>[r.pos,{...stock[r.pos],
         code:r.code,file:s.file,sheet:r.sheet,sourceLine:r.sourceLine}]));
