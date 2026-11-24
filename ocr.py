@@ -1006,6 +1006,24 @@ def extract_transport_rows(image,words,scratch,deadline,options,layout,high_imag
     return result,format(total,'f') if total is not None else ''
 
 
+def bottle_pack_reading(text, alternative=''):
+    """Normalize a printed bottle volume only with an explicit litre glyph.
+
+    A lost Cyrillic 'л' can look like 1, п or n in these scans. The decimal
+    correction remains a suggestion requiring review, never a trusted value.
+    """
+    prefix=r'\b(?:бут(?:ылка)?|byt)\.?\s*'
+    literal=prefix+r'(\d+)[,. ](\d{1,3})\s*([лlпn])\s*[*×°xх]\s*(\d{1,3})(?!\d)'
+    found=re.search(literal,text,re.I)
+    if found:
+        return text[:found.start()]+f'БУТ {found[1]},{found[2]} л*{found[4]}'+text[found.end():],True
+    damaged=re.search(prefix+r'(\d+)[,.](\d{2,3})\s*[*×°xх]\s*(\d{1,3})(?!\d)',text,re.I)
+    retry=re.search(literal,alternative,re.I)
+    if damaged and retry and damaged[1]==retry[1] and damaged[2]==retry[2]+'1' and damaged[3]==retry[4]:
+        return text[:damaged.start()]+f'БУТ {retry[1]},{retry[2]} л*{retry[4]}'+text[damaged.end():],True
+    return text,False
+
+
 def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_image=None):
     layout=layout or expanded_grid(image,words)
     if not layout:
@@ -1035,6 +1053,10 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
         original_words=[entry for entry in words if (a-3)/900*image.width<=entry[0]<(b+3)/900*image.width
                         and (y-1)/mask.height*image.height<=entry[1]<(z-1)/mask.height*image.height]
         original=' '.join(page_text(original_words).split())
+        if split:
+            alternate=grid_text(cells[0],scratch,deadline,options,'text','rus+eng',True,6) if deadline-monotonic()>8 else ''
+            pos,pack_recovered=bottle_pack_reading(pos,' '.join(alternate.split()))
+        else:pack_recovered=False
         pack=r'(?<!\d)(\d+[,.]\d{1,2})\s*[*×°]\s*(\d{1,3})(?!\d)'
         printed_pack=re.search(pack,original)
         if printed_pack and not re.search(pack,pos):
@@ -1049,6 +1071,10 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
         aliases={'упак':'уп','упаковка':'уп','упаковок':'уп','бутылка':'бут'}
         units={aliases.get(u,u) for u in units}
         units&={'шт','кг','уп','бут','л','г','мл'}
+        if split and not units and deadline-monotonic()>5:
+            direct=direct_grid_cell(gray,scale,(columns[1][0],y,columns[1][1],z))
+            retry={grid_text(direct,scratch,deadline,options,'unit',lang,binary).casefold().strip(' .|') for lang,binary in (('rus',False),('rus+eng',False))}
+            units={aliases.get(u,u) for u in retry}&{'шт','кг','уп','бут','л','г','мл'}
         unit=units.pop() if len(units)==1 else ''
         choices=[];votes=[]
         for i,cell in enumerate(cells[2:]):
@@ -1079,7 +1105,7 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
                 choices[0]=[compatible]
                 votes[0][compatible]=max(votes[0].values(),default=0)+1
                 if not unit:unit='уп'
-        result.append(dict(pos=pos,unit=unit,candidates=choices,votes=votes))
+        result.append(dict(pos=pos,unit=unit,candidates=choices,votes=votes,**({'packReview':True} if pack_recovered else {})))
     # Independent full-page OCR of the printed total, near the total label.
     total_labels=[y for x,y,_,t in words if x<image.width*.4 and abs(y/image.height-lines[-1]/mask.height)<.05
                   and re.sub(r'\W','',t.casefold()).translate(OCR_TOTAL_LABEL) in {'всего','итого'}]
@@ -1343,7 +1369,7 @@ def delivery_address(image,words):
             # a bare house number or an unlabelled address is not enough.
             literal=re.search(r'(?<!\d)(\d{6})[\s_,.]+(?:г\.?\s*)?([А-Яа-яЁё-]{2,})\s*(?:г\.?\s*)?[, ]+([А-Яа-яЁё-]{2,})\s+дом\s*(?:№\s*)?\d+',line,re.I)
             if literal:
-                tail=re.split(r'\s*\(\d+[а-я]?\)\s*|\b(?:ИНН|КПП|ОКПО|плательщик|документ)\b',line[literal.start():],maxsplit=1,flags=re.I)[0].strip(' ,;')
+                tail=re.split(r'\s*\(\d+[а-я]?\)\s*|\b(?:ИНН|КПП|ОКПО|плательщик|документ\w*)\b',line[literal.start():],maxsplit=1,flags=re.I)[0].strip(' ,;')
                 if 8<=len(tail)<=250:candidates.append(tail.replace('_',' '))
             continue
         if not street or not re.search(r'\d',line[street.start():]):
@@ -1429,6 +1455,17 @@ def validate_document_total(rows, total):
     return total
 
 
+def item_rows_before_signature(rows):
+    """The signature block is not part of the goods table on an UPD."""
+    result=[]
+    for row in rows:
+        name=' '.join(str(row.get('pos','')).casefold().split())
+        if re.match(r'^[\W\d]*(?:руководитель\s+организац\w*|главный\s+бухгалтер|иное\s+уполномоченное\s+лицо)\b',name):
+            break
+        result.append(row)
+    return result
+
+
 def recognize(name, data):
     if not shutil.which("tesseract"):
         raise RecognitionError("На сервере нужно установить Tesseract с русским языком.")
@@ -1460,6 +1497,7 @@ def recognize(name, data):
                                 extract_expanded_rows(image,words,folder/"cell.png",deadline,options,layout,high_image)) if layout else ([], '')
             if not rows and not transport:
                 rows, page_total = extract_rows(image,words)
+            rows=item_rows_before_signature(rows)
             if index==1:
                 fields = invoice_fields(image, words)
                 if high_image is not None and any(not fields.get(key) for key in ("number", "date", "supplier", "buyer", "deliveryAddress")) and deadline-monotonic()>8:
