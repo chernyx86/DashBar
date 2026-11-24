@@ -63,7 +63,9 @@ def source_pages(folder, name, data):
     match = re.search(r"^Pages:\s*(\d+)", info, re.M)
     if not match or not 1 <= int(match[1]) <= MAX_PAGES:
         raise RecognitionError(f"Распознавание принимает скан на 1–{MAX_PAGES} страниц. Разделите PDF по документам.")
-    command(["pdftoppm", "-scale-to", "2400", "-png", str(path), str(folder / "page")], timeout=18)
+    # Small phone scans often have a lot of blank margin around dense invoice
+    # tables. Keep enough source pixels for header and item recognition.
+    command(["pdftoppm", "-scale-to", "3200", "-png", str(path), str(folder / "page")], timeout=24)
     pages = sorted(folder.glob("page-*.png"))
     if len(pages) != int(match[1]):
         raise RecognitionError("Не удалось прочитать все страницы PDF.")
@@ -117,7 +119,7 @@ def page_text(words):
 def scan_page(image, scratch, deadline, options, preferred_angle=None):
     original = image
     image = image.copy()
-    image.thumbnail((2460, 2460), Image.Resampling.LANCZOS)
+    image.thumbnail((3200, 3200), Image.Resampling.LANCZOS)
     rotations = (0, 90, 270, 180) if preferred_angle is None else (preferred_angle, *(x for x in (0, 90, 270, 180) if x != preferred_angle))
     best = (-1, image, [], "", 0)
     for angle in rotations:
@@ -235,13 +237,14 @@ def expanded_grid(image, words):
     """Recognize the expanded UPD layout only when both headers and grid agree."""
     w, h = image.size
     names = [(x, y) for x,y,_,t in words if 'наименование' in t.casefold()]
-    prices = [(x,y) for x,y,_,t in words if re.fullmatch(r'цен[аыи]', re.sub(r'\W','',t.casefold()))]
+    prices = [(x,y) for x,y,_,t in words if re.fullmatch(
+        r'(?:цен[аыи]|тариф|стоимость)', re.sub(r'\W','',t.casefold()))]
     quantities = [(x,y) for x,y,_,t in words if t.casefold() == 'количество' or
                   (re.sub(r'\W','',t.casefold())=='коли' and any(abs(x-xx)<w*.025 and 0<yy-y<w*.06 and 'чество' in tt.casefold()
                     for xx,yy,_,tt in words))]
     totals = [(x,y) for x,y,_,t in words if re.sub(r'\W','',t.casefold()).translate(OCR_TOTAL_LABEL) in {'всего','итого'}]
     anchors = [(nx,ny,px,py,qx) for nx,ny in names for px,py in prices for qx,qy in quantities
-               if .23*w < px-nx < .39*w and .03*w < px-qx < .12*w
+               if .18*w < px-nx < .46*w and .015*w < px-qx < .15*w
                and abs(ny-py)<.04*w and abs(qy-py)<.04*w and ny<h*.62]
     if not anchors:
         return None
@@ -305,6 +308,172 @@ def expanded_grid(image, words):
     indices=((0,1),(2,3),(3,4),(5,6),(6,7),(8,9),(9,10)) if wide else ((0,1),(2,3),(3,4),(4,5),(5,6),(7,8),(8,9))
     cells=[(columns[a],columns[b]) for a,b in indices]
     return gray.rotate(angle,fillcolor=255,resample=Image.Resampling.BICUBIC),mask,scale,boundaries,total_end,cells,angle
+
+
+def standard_upd_grid(image, words):
+    """Locate item rows in the printed Russian UPD (universal transfer form).
+
+    The UPD has a stable page-wide table, but its narrow headers are often
+    unreadable in low-quality scans. Use the document label, table rules, and
+    the fixed printed form columns together; never use this fallback for a
+    generic invoice or a table without visible row rules.
+    """
+    width, height = image.size
+    text = page_text(words).casefold().replace("ё", "е")
+    if "передаточ" not in text or not re.search(r"счет.?фактура|продавец", text):
+        return None
+    name_hits = [(x, y) for x, y, _, token in words if "наимен" in token.casefold()
+                 and width * .08 <= x <= width * .42 and height * .14 <= y <= height * .60]
+    if not name_hits:
+        return None
+    # The printed UPD repeats the word "наименование" in its header block.
+    # The lowest occurrence is the goods-column heading on sideways scans.
+    name_x, name_y = max(name_hits, key=lambda p: p[1])
+    scale = width / 900
+    small = ImageOps.grayscale(image).resize((900, round(height / scale)), Image.Resampling.LANCZOS)
+    mask = small.point(lambda pixel: 255 if pixel < 205 else 0)
+
+    # A landscape UPD has variable row counts and column widths. Detect the
+    # ruled item bands first, then anchor the key cells to printed headings.
+    if width > height:
+        y_lo, y_hi = round(small.height * .40), round(small.height * .76)
+        horizontal = column_profile(mask, (20, y_lo, 880, y_hi))
+        rules = profile_peaks(horizontal, y_lo, 38)
+        chains = []
+        for start in range(len(rules)):
+            chain = [rules[start]]
+            for line in rules[start + 1:]:
+                gap = line - chain[-1]
+                if gap < 10:
+                    # Adjacent strokes are commonly the double bottom of a
+                    # header. Keep the later line as the first item boundary.
+                    if len(chain) == 1:
+                        chain[-1] = line
+                    continue
+                if gap > 42:
+                    break
+                chain.append(line)
+            if len(chain) >= 3:
+                chains.append(chain)
+        if not chains:
+            return None
+        boundaries = max(chains, key=lambda seq: (len(seq), seq[-1] - seq[0]))
+        # Remove any leftover duplicate header strokes.
+        clean = [boundaries[0]]
+        for line in boundaries[1:]:
+            if line - clean[-1] >= 10:
+                clean.append(line)
+            else:
+                clean[-1] = line
+        boundaries = clean
+        if not 3 <= len(boundaries) <= MAX_ROWS + 1:
+            return None
+
+        # Locate numeric columns from the printed UPD header words. The
+        # rightmost "всего" belongs to amount including VAT; the nearest
+        # "цена" anchors unit price, and the immediately preceding ruled band
+        # is quantity. These are page-relative, so vendor-specific widths work.
+        price_hits = [(x / scale, y / scale) for x, y, _, token in words
+                      if re.sub(r"\W", "", token.casefold()) in {"цена", "тариф"}
+                      and y > height * .28 and y < height * .58]
+        total_hits = [(x / scale, y / scale) for x, y, _, token in words
+                      if re.sub(r"\W", "", token.casefold()).translate(OCR_TOTAL_LABEL) == "всего"
+                      and y > height * .28 and y < height * .62]
+        if not price_hits or not total_hits:
+            return None
+        price_x = min(price_hits, key=lambda p: abs(p[1] - name_y))[0]
+        gross_x = max(x for x, _ in total_hits)
+        vertical = column_profile(mask, (20, boundaries[0] - 4, 880, boundaries[-1] + 4), True)
+        x_rules = profile_peaks(vertical, 0, 35)
+        x_rules = [x for x in x_rules if 30 <= x <= 880]
+
+        def nearest_left(x):
+            values = [v for v in x_rules if v < x]
+            return max(values) if values else None
+
+        def nearest_right(x):
+            values = [v for v in x_rules if v > x]
+            return min(values) if values else None
+
+        price_left, price_right = nearest_left(price_x), nearest_right(price_x)
+        gross_left, gross_right = nearest_left(gross_x), nearest_right(gross_x)
+        name_x_scaled = name_x / scale
+        name_left, name_right = nearest_left(name_x_scaled), nearest_right(name_x_scaled)
+        if not all(v is not None for v in (price_left, price_right, gross_left, gross_right,
+                                            name_left, name_right)):
+            return None
+        qty_left = nearest_left(price_left - 1)
+        if qty_left is None or price_left - qty_left < 8:
+            return None
+        # In this UPD family the two columns immediately before price are the
+        # unit and physical quantity; preserve the entire unit cell.
+        unit_left = name_right
+        if not (name_right < qty_left < price_left < gross_left < gross_right):
+            return None
+        # Tax amount is between net and gross. Its exact cell is not required
+        # to calculate the user-facing unit price, but retaining it supports
+        # the existing review form.
+        net_left = price_right
+        net_right = nearest_right(net_left + 1)
+        if net_right is None or net_right >= gross_left:
+            return None
+        vat_left = nearest_left(gross_left - 1)
+        if vat_left is None or vat_left < net_right:
+            vat_left = net_right
+        cells = [(name_left, name_right), (unit_left, qty_left), (qty_left, price_left),
+                 (price_left, price_right), (net_left, net_right), (vat_left, gross_left),
+                 (gross_left, gross_right)]
+        return small, mask, scale, boundaries, boundaries[-1], cells, 0
+
+    y_start = max(0, round(name_y / scale) - 90)
+    y_end = min(small.height, round(name_y / scale) + 190)
+    horizontal = column_profile(mask, (20, y_start, 880, y_end))
+    rules = profile_peaks(horizontal, y_start, 55)
+    # UPD item rows are usually 12–36 pixels high at a 900px page width.
+    # Find a run of at least four item rows and the narrow document-total row.
+    sequences = []
+    for start in range(len(rules)):
+        chosen = [rules[start]]
+        while len(chosen) < 6:
+            previous = chosen[-1]
+            next_lines = [line for line in rules if line > previous and 11 <= line - previous <= 36]
+            if not next_lines:
+                break
+            chosen.append(next_lines[0])
+        if len(chosen) == 6 and 7 <= chosen[-1] - chosen[-2] <= 20:
+            if chosen[0] > name_y / scale + 20:
+                sequences.append(chosen)
+    if not sequences:
+        return None
+    boundaries = min(sequences, key=lambda seq: abs(seq[0] - name_y / scale - 48))
+    if not (4 <= len(boundaries) - 1 <= MAX_ROWS):
+        return None
+
+    top, bottom = boundaries[0] - 3, boundaries[-1] + 3
+    vertical = column_profile(mask, (20, max(0, round(name_y / scale) - 20), 880,
+                                     min(small.height, round(boundaries[-1] + 5))), True)
+    x_rules = profile_peaks(vertical, 20, 65)
+    # Standard UPD columns, expressed against its detected left/right table
+    # edges. The ruled columns are checked before accepting the profile.
+    edges = [x for x in x_rules if x < 120 or x > 800]
+    if len(edges) < 2:
+        return None
+    left, right = min(edges), max(edges)
+    if right - left < 700:
+        return None
+    canonical = (102, 280, 311, 332, 365, 412, 455, 507, 587, 642, 703)
+    # Keep the canonical positions exact after proving the page edges and
+    # nearby rules; a one-pixel drift at this scale can cut a printed digit.
+    columns = list(canonical)
+    # Require visible vertical rules around the description, quantity, price,
+    # net, VAT, and gross amount columns.
+    for x in columns[1:]:
+        if not any(abs(hit - x) <= 9 for hit in x_rules):
+            return None
+    cells = [(columns[a], columns[b]) for a, b in
+             ((0, 1), (2, 4), (4, 5), (5, 6), (6, 7), (8, 9), (9, 10))]
+    total_end = boundaries[-1]
+    return ImageOps.grayscale(small), mask, scale, boundaries[:-1], total_end, cells, 0
 
 
 def transport_grid(image,words):
@@ -385,6 +554,17 @@ def grid_cell(image,mask,scale,box,short=False,total=False):
         if value>180 and (xx<cell.width*.06 or xx>cell.width*.94):
             draw.line((xx,0,xx,cell.height),fill=255)
     return cell
+
+
+def direct_grid_cell(image, scale, box):
+    """Crop a high-resolution, ruled-table cell without resizing its source."""
+    a, y, b, z = box
+    inset = max(3, round(scale * 1.8))
+    x1, x2 = round(a * scale) + inset, round(b * scale) - inset
+    y1, y2 = round(y * scale) + inset, round(z * scale) - inset
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return ImageOps.autocontrast(ImageOps.grayscale(image.crop((x1, y1, x2, y2))), cutoff=1)
 
 
 def grid_text(cell,scratch,deadline,options,mode,lang,binary=False,psm=None):
@@ -612,6 +792,11 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
         cells=[grid_cell(gray,mask,scale,(a,y,b,z),short=i>0) for i,(a,b) in enumerate(columns)]
         pos=' '.join(grid_text(cells[0],scratch,deadline,options,'text','rus+eng').split())
         pos=re.sub(r'\s+',' ',pos.replace('|',' ').replace('_',' ')).strip(' —')
+        if high_image is not None and len(re.findall(r'[А-Яа-яЁё]{2,}', pos)) < 2:
+            direct = direct_grid_cell(high_image, scale, (columns[0][0], y, columns[0][1], z))
+            recovered = ' '.join(grid_text(direct, scratch, deadline, options, 'text', 'rus+eng', psm=6).split())
+            if len(re.findall(r'[А-Яа-яЁё]{2,}', recovered)) > len(re.findall(r'[А-Яа-яЁё]{2,}', pos)):
+                pos = recovered
         pos=re.sub(r'(\d[,.]\d{1,2})[°×](?=\d)',r'\1*',pos)
         # A second reading from the full-page text can recover marks between
         # volume and packing count. Never infer a pack count from a number
@@ -640,6 +825,10 @@ def extract_expanded_rows(image,words,scratch,deadline,options,layout=None,high_
             a,b=columns[i+2]
             raw_y=(y+5)/mask.height*image.height
             reads.append(number_in_column(words,raw_y,image.width*.013,(a-3)/900*image.width,(b+3)/900*image.width))
+            if high_image is not None:
+                direct = direct_grid_cell(high_image, scale, (a, y, b, z))
+                reads.extend(grid_text(direct,scratch,deadline,options,'number',lang,binary,7)
+                             for lang,binary in (('eng',False),('eng',True)))
             choices.append(decimal_candidates(reads,i>0))
             counts={}
             for raw in reads:
@@ -815,6 +1004,61 @@ def invoice_fields(image, words):
             "deliveryAddress":delivery_address(image,words)}
 
 
+def high_resolution_header_fields(image, scratch, deadline, options):
+    """Retry UPD header fields with a larger OCR pass when page TSV missed them."""
+    header = image.crop((0, 0, image.width, round(image.height * .24)))
+    ImageOps.autocontrast(ImageOps.grayscale(header), cutoff=1).save(scratch)
+    try:
+        raw = command(["tesseract", str(scratch), "stdout", *options, "-l", "+".join(OCR_LANGUAGES), "--psm", "6"],
+                      timeout=min(16, max(2, deadline - monotonic())))
+    except RecognitionError:
+        return {}
+    text = raw.decode("utf-8", "replace")
+    normalized = re.sub(r"\s+", " ", text).replace("ё", "е")
+    result = {}
+    months = "января февраля марта апреля мая июня июля августа сентября октября ноября декабря"
+    written = re.search(r"\b(\d{1,2})\s+(" + "|".join(months.split()) + r")\s+(20\d{2})\b", normalized, re.I)
+    numeric = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b", normalized)
+    date_match = written or numeric
+    if date_match:
+        try:
+            month = months.split().index(written[2].lower()) + 1 if written else int(numeric[2])
+            year = int(written[3]) if written else int(numeric[3])
+            result["date"] = calendar_date(year, month, int(date_match[1])).isoformat()
+        except (ValueError, IndexError):
+            pass
+    number_match = re.search(r"(?:№|N[еe0o°])\s*[:.]?\s*([0-9]{4,14})", normalized, re.I)
+    if number_match:
+        result["number"] = number_match[1]
+
+    def company(segment):
+        legal = r"(?:общество\s+[св]\s+ограниченн\w*\s+ответственност\w*|ооо|ип|ао|пао|оао|зао)"
+        match = re.search(legal + r"\s*[«\"“„'‘]?\s*([^»\"”’'\n,()]{2,55})", segment, re.I)
+        if not match:
+            return ""
+        name = re.split(r"\s+(?:инн|кпп|адрес|покупатель|продавец)\b", match[1], maxsplit=1, flags=re.I)[0]
+        name = name.strip(" .:; «»\"“”'‘’")
+        if not re.fullmatch(r"[А-ЯЁ][А-ЯЁа-яё .-]{2,54}", name):
+            return ""
+        prefix = re.match(r"общество\s+[св]\s+ограниченн\w*\s+ответственност\w*", match[0], re.I)
+        kind = "ООО" if prefix or match[0].strip().lower().startswith("ооо") else match[0].split()[0].upper()
+        return f"{kind} {name}" if name else ""
+
+    seller_label = re.search(r"прода[а-яе]*", text, re.I)
+    buyer_label = re.search(r"покупатель", text, re.I)
+    if seller_label:
+        end = buyer_label.start() if buyer_label and buyer_label.start() > seller_label.start() else seller_label.start() + 260
+        result["supplier"] = company(text[seller_label.start():end])
+    if buyer_label:
+        end = min((p.start() for p in re.finditer(r"инн|кпп|адрес|грузополуч", text[buyer_label.start():], re.I)), default=260)
+        result["buyer"] = company(text[buyer_label.start():buyer_label.start()+end])
+        buyer_block = text[buyer_label.start():buyer_label.start()+420]
+        address = re.search(r"\b(\d{6})\s*,?\s*((?:г\.?\s*)?[а-яеё][^\n()]{4,130}?(?:ул\.?|улица|пер\.?|переулок|проспект|шоссе|наб\.?)[^\n()]{0,80}?(?:дом\s*(?:№\s*)?\d+|д\.?\s*\d+))", buyer_block, re.I)
+        if address:
+            result["deliveryAddress"] = (address[1] + " " + address[2]).strip(" ,.;")
+    return result
+
+
 def delivery_address(image,words):
     """Read an explicitly labelled consignee/delivery address, not the buyer's legal address."""
     width=image.width
@@ -901,19 +1145,22 @@ def recognize(name, data):
     options = tesseract_options()
     with TemporaryDirectory(prefix="bar-ocr-") as dirname:
         folder = Path(dirname)
-        deadline = monotonic()+70
+        deadline = monotonic()+120
         pages = source_pages(folder,name,data)
         all_rows, all_text, previews = [], [], []
         fields, total, angle = {}, "", None
         for index, page in enumerate(pages,1):
             image, words, combined, angle = scan_page(read_image(page),folder/"work.png",deadline,options,angle)
             transport=bool(re.search(r'товарно\s*[-–—]?\s*транспортная\s+накладная',combined,re.I))
-            layout=transport_grid(image,words) if transport else expanded_grid(image,words)
+            if transport:
+                layout = transport_grid(image, words)
+            else:
+                layout = standard_upd_grid(image, words) or expanded_grid(image, words)
             high_image=None
             if layout and Path(name).suffix.lower()=='.pdf' and deadline-monotonic()>15:
                 try:
                     prefix=folder/f'high-{index}'
-                    command(['pdftoppm','-f',str(index),'-l',str(index),'-singlefile','-scale-to','3600','-png',str(folder/'source.pdf'),str(prefix)],timeout=8)
+                    command(['pdftoppm','-f',str(index),'-l',str(index),'-singlefile','-scale-to','5000','-png',str(folder/'source.pdf'),str(prefix)],timeout=30)
                     high_image=read_image(prefix.with_suffix('.png'))
                     if angle:
                         high_image=high_image.rotate(angle,expand=True)
@@ -925,6 +1172,11 @@ def recognize(name, data):
                 rows, page_total = extract_rows(image,words)
             if index==1:
                 fields = invoice_fields(image, words)
+                if high_image is not None and any(not fields.get(key) for key in ("number", "date", "supplier", "buyer")):
+                    retry = high_resolution_header_fields(high_image, folder/"header.png", deadline, options)
+                    for key, value in retry.items():
+                        if not fields.get(key) and value:
+                            fields[key] = value
                 if transport and deadline-monotonic()>8:
                     fields.update(transport_header(image,words,high_image,folder/'transport-header.png',deadline,options))
                 if not fields['supplierInn'] and deadline-monotonic()>6:
