@@ -126,7 +126,7 @@ const KEY="barmanager-proto-v2", OLD="barmanager-proto-v1";
 function blank(){return{
   v:2, mode:null, step:"start", tab:"today", theme:null, viewAs:"owner",
   user:{name:"",phone:"",tg:false},
-  venue:{name:"",city:"",format:"",points:1,stockName:"",address:""},
+  venue:{name:"",city:"",format:"",points:1,stockName:"",address:"",autoReceipt:true},
   ans:{problem:"",system:"",access:"",flow:[]},
   sec:{stock:{q:{},asked:false,docs:{}},receiving:{q:{},asked:false,docs:{}},cards:{q:{},asked:false,docs:{}},reports:{q:{},asked:true,docs:{}}},
   findings:[], st:{}, cal:[], chat:[], order:[], team:[],
