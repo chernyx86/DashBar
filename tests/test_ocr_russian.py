@@ -8,10 +8,21 @@ from time import monotonic
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr import recognize, expanded_grid, transport_grid, split_quantity_grid, extract_expanded_rows, tesseract_options, reconcile_package_quantity, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address, validate_document_total
+from ocr import recognize, expanded_grid, transport_grid, split_quantity_grid, extract_expanded_rows, tesseract_options, reconcile_package_quantity, resolve_grid_document, resolve_grid_core, valid_inn, invoice_fields, delivery_address, validate_document_total, item_rows_before_signature, bottle_pack_reading
 
 
 class ExpandedGridTest(unittest.TestCase):
+    def test_signature_block_is_not_a_product(self):
+        rows=[{'pos':'Чай','qty':'2'},{'pos':'Руководитель организации иное уполномоченное лицо','qty':'30'},{'pos':'Дата подписи','qty':'1'}]
+        self.assertEqual(item_rows_before_signature(rows),rows[:1])
+        self.assertEqual(item_rows_before_signature([{'pos':'Книга Руководитель организации'}]),[{'pos':'Книга Руководитель организации'}])
+
+    def test_bottle_litre_glyph_and_decimal_recovery(self):
+        self.assertEqual(bottle_pack_reading('Пиво БУТ 0.51*12','Пиво БУТ 0 5п*12'),('Пиво БУТ 0,5 л*12',True))
+        self.assertEqual(bottle_pack_reading('Пиво БУТ 0.5n°12'),('Пиво БУТ 0,5 л*12',True))
+        self.assertEqual(bottle_pack_reading('Пиво БУТ 0.51*12'),('Пиво БУТ 0.51*12',False))
+        self.assertEqual(bottle_pack_reading('Пиво БУТ 0.51*12','Пиво БУТ 0 5п*24'),('Пиво БУТ 0.51*12',False))
+
     def test_quantity_comma_recovery_requires_independent_piece_count(self):
         self.assertEqual(reconcile_package_quantity([Decimal('4000')],['12','12','2','14'],['48000','48,00','45,00']),Decimal('4'))
         self.assertIsNone(reconcile_package_quantity([Decimal('4000')],['12','12'],['45,00']))
