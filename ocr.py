@@ -11,6 +11,7 @@ from math import cos, radians, sin
 from datetime import date as calendar_date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from contextlib import ExitStack
 from tempfile import TemporaryDirectory
 from time import monotonic
 
@@ -1471,7 +1472,13 @@ def recognize(name, data):
     if not shutil.which("tesseract"):
         raise RecognitionError("На сервере нужно установить Tesseract с русским языком.")
     options = tesseract_options()
-    with TemporaryDirectory(prefix="bar-ocr-") as dirname:
+    with TemporaryDirectory(prefix="bar-ocr-") as dirname, ExitStack() as resources:
+        try:
+            from ruled_invoice import CellReader, printed_table, printed_header
+            cell_reader = CellReader(os.fsencode(options[1]) if options else None)
+            resources.callback(cell_reader.cleanup.close)
+        except (ImportError, OSError, AttributeError):
+            cell_reader = None
         folder = Path(dirname)
         deadline = monotonic()+120
         pages = source_pages(folder,name,data)
@@ -1481,7 +1488,15 @@ def recognize(name, data):
             image, words, combined, angle = scan_page(read_image(page),folder/"work.png",deadline,options,angle)
             page_angles.append(angle)
             transport=bool(re.search(r'товарно\s*[-–—]?\s*транспортная\s+накладная',combined,re.I))
-            if transport:
+            ruled = None
+            if cell_reader:
+                try:
+                    ruled = printed_table(image, cell_reader, deadline, transport, all_rows)
+                except OSError:
+                    cell_reader = None
+            if ruled:
+                layout = None
+            elif transport:
                 layout = transport_grid(image, words)
             else:
                 layout = split_quantity_grid(image, words) or standard_upd_grid(image, words) or expanded_grid(image, words)
@@ -1495,8 +1510,8 @@ def recognize(name, data):
                         high_image=high_image.rotate(angle,expand=True)
                 except RecognitionError:
                     pass
-            rows, page_total = (extract_transport_rows(image,words,folder/"cell.png",deadline,options,layout,high_image) if transport else
-                                extract_expanded_rows(image,words,folder/"cell.png",deadline,options,layout,high_image)) if layout else ([], '')
+            rows, page_total = ruled or ((extract_transport_rows(image,words,folder/"cell.png",deadline,options,layout,high_image) if transport else
+                                extract_expanded_rows(image,words,folder/"cell.png",deadline,options,layout,high_image)) if layout else ([], ''))
             if not rows and not transport:
                 rows, page_total = extract_rows(image,words)
             rows=item_rows_before_signature(rows)
@@ -1522,6 +1537,15 @@ def recognize(name, data):
                     fields.update(transport_header(image,words,high_image,folder/'transport-header.png',deadline,options))
                 if not fields['supplierInn'] and deadline-monotonic()>6:
                     fields['supplierInn']=retry_seller_inn(image,words,high_image,folder/'inn.png',deadline,options)
+                if cell_reader and not transport and deadline-monotonic()>5:
+                    try:
+                        printed = printed_header(image,cell_reader)
+                        if fields.get('deliveryAddress') and not re.search(
+                                r'документ|его адрес|платеж', fields['deliveryAddress'], re.I):
+                            printed.pop('deliveryAddress', None)
+                        fields.update(printed)
+                    except OSError:
+                        pass
             if len(all_rows)+len(rows)>MAX_ROWS:
                 raise RecognitionError("В документе слишком много строк для одного предпросмотра.")
             all_rows.extend(rows)
