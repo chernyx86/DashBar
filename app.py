@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from edi import EdiError, parse_edi
+from invoice_vision import VisionError, needs_visual, read_visual_invoice, visual_pages
 from ocr import IMAGE_FORMATS, RecognitionError, recognize
 
 HTML = Path(__file__).with_name("index.html")
@@ -429,6 +430,7 @@ async def lifespan(app):
     app.state.push = os.getenv("BM_PUSH_TOKEN", "")
     app.state.ai_key = os.getenv("BM_AI_OPENAI_KEY", "").strip()
     app.state.ai_model = os.getenv("BM_AI_OPENAI_MODEL", "").strip()
+    app.state.vision_model = os.getenv("BM_INVOICE_VISION_MODEL", "").strip()
     app.state.store = Store(os.getenv("BM_DB", "data/intake.sqlite3"), Fernet(os.environ["BM_ENCRYPTION_KEY"]))
     app.state.status, app.state.lock = {}, asyncio.Lock()
     app.state.ocr_lock = asyncio.Lock()
@@ -635,10 +637,24 @@ async def recognize_document(request: Request, ident: int):
     async with lock:
         store = request.app.state.store
         name, data = await asyncio.to_thread(store.download, ident)
+        state = request.app.state
+        result, local_error = None, None
         try:
             result = await asyncio.to_thread(recognize, name, data)
         except RecognitionError as error:
-            raise HTTPException(422, str(error)) from error
+            local_error = error
+        if state.ai_key and state.vision_model and needs_visual(result):
+            try:
+                angles = (result or {}).get("pageAngles", ())
+                pages = await asyncio.to_thread(visual_pages, name, data, angles)
+                await asyncio.to_thread(store.record_audit, "invoice_vision_requested", "openai")
+                result = await read_visual_invoice(state.client, state.ai_key, state.vision_model, pages)
+            except (RecognitionError, VisionError) as error:
+                if result is None:
+                    raise HTTPException(422, str(error)) from error
+                result["recognitionNote"] = str(error)
+        if result is None:
+            raise HTTPException(422, str(local_error)) from local_error
         return Response(content=json.dumps(result, ensure_ascii=False),
                         media_type="application/json", headers={"Cache-Control": "no-store"})
 

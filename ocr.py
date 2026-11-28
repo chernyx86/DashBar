@@ -65,8 +65,9 @@ def source_pages(folder, name, data):
         raise RecognitionError(f"Распознавание принимает скан на 1–{MAX_PAGES} страниц. Разделите PDF по документам.")
     # Small phone scans often have a lot of blank margin around dense invoice
     # tables. Keep enough source pixels for header and item recognition.
-    command(["pdftoppm", "-scale-to", "3200", "-png", str(path), str(folder / "page")], timeout=24)
-    pages = sorted(folder.glob("page-*.png"))
+    command(["pdftoppm", "-scale-to", "3200", "-jpeg", "-jpegopt", "quality=95",
+             str(path), str(folder / "page")], timeout=35)
+    pages = sorted(folder.glob("page-*.jpg"))
     if len(pages) != int(match[1]):
         raise RecognitionError("Не удалось прочитать все страницы PDF.")
     return pages
@@ -1474,10 +1475,11 @@ def recognize(name, data):
         folder = Path(dirname)
         deadline = monotonic()+120
         pages = source_pages(folder,name,data)
-        all_rows, all_text, previews = [], [], []
+        all_rows, all_text, previews, page_angles = [], [], [], []
         fields, total, angle = {}, "", None
         for index, page in enumerate(pages,1):
             image, words, combined, angle = scan_page(read_image(page),folder/"work.png",deadline,options,angle)
+            page_angles.append(angle)
             transport=bool(re.search(r'товарно\s*[-–—]?\s*транспортная\s+накладная',combined,re.I))
             if transport:
                 layout = transport_grid(image, words)
@@ -1537,4 +1539,4 @@ def recognize(name, data):
         if re.search(r'товарно\s*[-–—]?\s*транспортная\s+накладная',text,re.I):
             warning="Распознана товарно-транспортная накладная (ТТН). Для сверки закупочной цены и НДС используйте соответствующий УПД или счёт-фактуру."
         return {**fields,"rows":all_rows,"total":total,"preview":previews,"ocrText":text,"documentWarning":warning,
-                "mode":"local-ocr"}
+                "mode":"local-ocr","pageAngles":page_angles}
