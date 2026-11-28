@@ -1514,6 +1514,31 @@ def recognize(name, data):
                                 extract_expanded_rows(image,words,folder/"cell.png",deadline,options,layout,high_image)) if layout else ([], ''))
             if not rows and not transport:
                 rows, page_total = extract_rows(image,words)
+            if (cell_reader and Path(name).suffix.lower()=='.pdf' and deadline-monotonic()>22
+                    and (not rows or any(not row.get('qty') for row in rows))):
+                # Lossless rendering can recover cell borders and decimal marks
+                # lost on the initial JPEG. Only combine rows with matching sums.
+                try:
+                    prefix = folder/f'grid-retry-{index}'
+                    command(['pdftoppm','-f',str(index),'-l',str(index),'-singlefile',
+                             '-scale-to','4000' if rows else '3000','-gray','-png',
+                             str(folder/'source.pdf'),str(prefix)],timeout=18)
+                    alternate = read_image(prefix.with_suffix('.png'))
+                    if angle:
+                        alternate = alternate.rotate(angle,expand=True)
+                    retry = printed_table(alternate,cell_reader,deadline,transport,all_rows)
+                    if retry and not rows:
+                        rows,page_total = retry
+                    elif retry and len(rows)==len(retry[0]) and all(
+                            a.get('gross') and a['gross']==b.get('gross')
+                            for a,b in zip(rows,retry[0])):
+                        for current,other in zip(rows,retry[0]):
+                            for key in ('qty','unit','netSum','vat'):
+                                if not current.get(key) and other.get(key):
+                                    current[key]=other[key]
+                        page_total = page_total or retry[1]
+                except (OSError,RecognitionError):
+                    pass
             rows=item_rows_before_signature(rows)
             if index==1:
                 fields = invoice_fields(image, words)

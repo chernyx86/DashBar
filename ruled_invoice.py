@@ -280,6 +280,11 @@ def printed_table(image, reader, deadline, transport=False, previous_rows=()):
                 if readings & UNIT_CODES.keys():
                     unit_index=j+1
                     break
+            if unit_index == q-1 and q>=5:
+                for j in range(q-4,q-1):
+                    if re.search(r'обозна|нацио',heading(j)):
+                        unit_index=j
+                        break
             name_candidates = list(range(max(0,unit_index-7),unit_index-1))
             if not name_candidates:
                 continue
@@ -332,17 +337,23 @@ def printed_table(image, reader, deadline, transport=False, previous_rows=()):
                     values = numeric_candidates(reader,cell,3)
                     by_column.append(values)
                     candidates.update(values)
+                net_checks = set(readings['netSum']) | {g-t for g,t in product(readings['gross'], readings['vat']) if g>=t}
                 compatible = {n:w for n,w in candidates.items() if n>0 and any(
                     abs(n*p-net)<=n*Decimal('.005')+Decimal('.01')
-                    for p,net in product(readings['netPrice'],readings['netSum']))}
-                if len(by_column)==3 and re.search('уп',row['unit'],re.I):
+                    for p,net in product(readings['netPrice'],net_checks))}
+                if len(by_column)==3:
                     per_case, cases, pieces = by_column
                     pack_counts = {v for v in cases if v>0}
                     pack_counts.update(v/1000 for v in cases if v>=1000 and v%1000==0)
                     verified = {v:1 for v in pack_counts if any(
                         size>=1 and size*v in pieces for size in per_case)}
-                    if len(verified)==1:
+                    if len(verified)==1 and (re.search('уп',row['unit'],re.I)
+                            or 'мест' in heading(q-1) and 'мест' in heading(q-2)):
                         compatible = verified
+                    elif re.search('количеств.{0,12}объем',heading(unit_index+1),re.I):
+                        # A column explicitly labelled quantity (volume) comes
+                        # before the columns for items per case and case count.
+                        compatible = {v:w for v,w in by_column[0].items() if v in compatible} or compatible
                 readings['qty'] = compatible if len(compatible)==1 else {}
             reconcile_row(row,readings)
             if not transport:
