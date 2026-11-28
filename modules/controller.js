@@ -371,6 +371,10 @@ app.addEventListener("input",ev=>{
   if(sheet?.t==="ocr"&&t.dataset.ocrKey){
     const target=t.dataset.ocrIndex===undefined?sheet:sheet.rows[Number(t.dataset.ocrIndex)];
     if(target)target[t.dataset.ocrKey]=t.value;
+    if(target&&(t.dataset.ocrIndex!==undefined||t.dataset.ocrKey==="total")){
+      const overview=document.getElementById("ocr-overview")?.parentElement;
+      if(overview)overview.outerHTML=ocrOverview(sheet);
+    }
     if(target&&t.dataset.ocrIndex!==undefined){const summary=document.getElementById("ocr-summary-"+t.dataset.ocrIndex);if(summary)summary.textContent=ocrRowSummary(target);}
     if(target&&t.dataset.ocrKey==="pos"&&t.dataset.ocrIndex!==undefined){
       delete target.stockMatch;

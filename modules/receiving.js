@@ -327,17 +327,44 @@ const intakeKind=`<select class="in" name="kind" aria-label="Тип докуме
 const intakeOnServer=()=>!document.documentElement.hasAttribute?.("data-standalone")&&
   ["http:","https:"].includes(location.protocol);
 function blankOcrRow(){return {pos:"",unit:"",qty:"",netPrice:"",netSum:"",vat:"",gross:"",needsReview:false};}
+function ocrOverview(s){
+  if(!s.detectedRows)return "";
+  const total=readNumber(s.total);
+  const lineTotal=s.rows.reduce((sum,row)=>{
+    const amount=readNumber(row.gross);
+    return String(row.gross??"").trim()&&Number.isFinite(amount)?sum+cents(amount):NaN;
+  },0);
+  const verified=Number.isSafeInteger(lineTotal)&&Number.isFinite(total)&&lineTotal===cents(total);
+  const label=s.documentWarning?"Сумма":"Сумма с НДС";
+  return `<div class="tw" style="flex:none"><table id="ocr-overview">
+    <thead><tr><th scope="col">Товар</th><th scope="col">Количество</th><th scope="col">Фасовка и объём</th><th scope="col">Цена за ед.</th><th scope="col">${label}</th></tr></thead>
+    <tbody>${s.rows.map((row,i)=>{
+      const qty=readNumber(row.qty), gross=readNumber(row.gross);
+      const pack=invoicePack(row);
+      const packs=pack?.packCount&&pack.pieceQty%pack.packCount===0
+        ? " · "+fmt(pack.pieceQty/pack.packCount,0)+" уп." : "";
+      return `<tr><th scope="row">${esc(row.pos||"Строка "+(i+1))}</th>
+        <td>${qty>0?esc(fmt(qty,3)+" "+row.unit):"—"}</td><td>${esc(invoicePackLabel(row)+packs)}</td>
+        <td>${qty>0&&Number.isFinite(gross)?esc(exactMoney(gross/qty)):"—"}</td>
+        <td>${Number.isFinite(gross)?esc(exactMoney(gross)):"—"}</td></tr>`;
+    }).join("")}</tbody>
+    <tfoot><tr><th scope="row" colspan="4">${verified?"Итог сходится":"Итог по документу"}</th>
+      <td>${Number.isFinite(total)?esc(exactMoney(total)):"—"}</td></tr></tfoot>
+    </table></div>`;
+}
 function renderOcr(s){
   const catalog=invoiceCatalog();
   const input=(label,key,value,index,required=true)=>`<label class="field">${label}<input class="in" data-ocr-key="${key}" ${index==null?"":`data-ocr-index="${index}"`}
     ${["qty","netPrice","netSum","vat","gross","total"].includes(key)?'inputmode="decimal"':key==="date"?'type="date"':""} value="${esc(value)}" ${required?"required":""}></label>`;
   const calculatedLabels={qty:"количество",netPrice:"цена",netSum:"сумма без НДС",vat:"НДС",gross:"сумма с НДС"};
   const pending=s.rows.filter(row=>row.needsReview||!row.pos||!row.unit||["qty","gross"].some(key=>row[key]==="" )).length;
-  return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":"распознано на сервере DashBar"}</p>
+  return `<h2>Проверить накладную</h2><p class="muted">${esc(s.name)} · ${s.mode==="edi-xml"?"XML УПД":s.mode==="visual-ocr"?"Визуальное распознавание":"Локальное распознавание"}</p>
     <p>Сверьте поставщика, покупателя, дату, фасовку, количество, цену, НДС и итог с оригиналом. Все поля можно исправить.</p>
     <p class="muted">${catalog.length?`Справочник бара: ${catalog.length} позиций. Выберите подходящее название, если оно предложено.`:"Загрузите остатки или инвентаризацию в разделе «Склад», чтобы получать подсказки по названиям товаров."}</p>
     <div class="res" role="status"><b>Строк распознано: ${s.detectedRows}</b><span>${pending?`Нужно проверить: ${pending}.`:"Сверьте данные с оригиналом перед сохранением."}</span></div>
+    ${s.recognitionNote?`<p class="res">${esc(s.recognitionNote)}</p>`:""}
     ${s.documentWarning?`<p class="res">${esc(s.documentWarning)}</p>`:""}
+    ${ocrOverview(s)}
     ${s.mode==="local-ocr"&&!s.detectedRows?'<p class="muted">Строки таблицы не распознаны. Сверьте документ по изображению или загрузите выгрузку ЭДО.</p>':""}
     ${s.preview.length?`<details class="card"><summary>Изображение документа</summary>
     ${s.preview.map((data,i)=>`<img style="width:100%;height:auto" src="data:image/jpeg;base64,${esc(data)}" alt="Страница ${i+1} накладной">`).join("")}</details>`:""}
@@ -368,15 +395,15 @@ function renderOcr(s){
     ${input(s.documentWarning?"Итог по документу":"Итог по документу с НДС","total",s.total)}
     <p class="muted" role="status">${esc(s.error||"")}</p>
     <button class="btn p">Подтвердить и сохранить</button>
-    ${S.venue.autoReceipt!==false?'<p class="muted">При полном совпадении адреса и складских позиций накладная автоматически попадёт на склад DashBar.</p>':""}
+    ${s.mode==="visual-ocr"?'<p class="muted">Сверьте черновик визуального распознавания и подтвердите его перед приходом.</p>':S.venue.autoReceipt!==false?'<p class="muted">При полном совпадении адреса и складских позиций накладная автоматически попадёт на склад DashBar.</p>':""}
     </form>
     ${s.ocrText?`<details class="card"><summary>Исходный текст распознавания (для диагностики)</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;margin:0">${esc(s.ocrText)}</pre></details>`:""}`;
 }
 async function openOcr(item,state,mode){
   const xml=/\.xml$/i.test(item.name);
-  const result=await incomingRequest("/documents/"+item.id+(xml?"/edi":"/recognize"),{method:xml?"GET":"POST"});
+  const result=await incomingRequest("/documents/"+item.id+(xml?"/edi":"/recognize"),{method:xml?"GET":"POST",timeout:xml?90000:260000});
   if(S!==state||S.mode!==mode||sheet?.t!=="receivingsources")return "Откройте документ в очереди для проверки.";
-  sheet={t:"ocr",queueId:item.id,name:item.name,mode:result.mode,supplierInn:result.supplierInn||"",supplier:result.supplier||"",buyer:result.buyer||"",number:result.number||"",
+  sheet={t:"ocr",queueId:item.id,name:item.name,mode:result.mode,recognitionNote:result.recognitionNote||"",supplierInn:result.supplierInn||"",supplier:result.supplier||"",buyer:result.buyer||"",number:result.number||"",
     date:result.date||"",deliveryAddress:result.deliveryAddress||"",total:result.total||"",documentWarning:result.documentWarning||"",detectedRows:result.rows?.length||0,rows:result.rows?.length?result.rows:[blankOcrRow()],
     preview:(result.preview||[]).filter(data=>/^[a-z0-9+/=]+$/i.test(data)),ocrText:result.ocrText||""};
   const draft=sheet;
@@ -389,6 +416,8 @@ async function openOcr(item,state,mode){
     }catch(error){draft.error=error.message;}
   }
   render(true);
+  const panel=document.querySelector(".sheet");
+  if(panel)panel.scrollTop=0;
   return "Проверьте распознанную накладную.";
 }
 function persistOcrDraft(draft,automaticOnly=false){
@@ -510,13 +539,13 @@ function paintIncoming(message){
   const queue=document.getElementById("incoming-queue");
   if(queue)queue.innerHTML=incomingQueue();
 }
-async function incomingRequest(path,{method="GET",body,file,blob=false}={}){
+async function incomingRequest(path,{method="GET",body,file,blob=false,timeout=90000}={}){
   if(!intakeOnServer()||!incoming.token)throw new Error("Откройте сервер приёмки и подключите очередь ключом оператора.");
   const headers={Authorization:"Bearer "+incoming.token};
   if(body)headers["Content-Type"]="application/json";
   if(file)headers["Content-Type"]="application/octet-stream";
   const response=await fetch("/api/intake"+path,{method,headers,body:file||(body?JSON.stringify(body):undefined),
-    credentials:"same-origin",redirect:"error",cache:"no-store",signal:AbortSignal.timeout(90000)});
+    credentials:"same-origin",redirect:"error",cache:"no-store",signal:AbortSignal.timeout(timeout)});
   if(response.status===401)throw new Error("Ключ оператора не принят сервером.");
   const type=response.headers.get("content-type")||"";
   const result=type.includes("application/json")?await response.json():null;
